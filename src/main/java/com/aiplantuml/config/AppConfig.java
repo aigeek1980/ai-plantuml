@@ -18,6 +18,29 @@ public class AppConfig {
     private static final String KEY_EDITOR_BG = "ui.editorBackground";
     private static final String KEY_DIAGRAM_BG = "ui.diagramBackground";
     private static final String KEY_CHAT_BG = "ui.chatBackground";
+    private static final String KEY_EXPORT_TABLE_PROMPT = "export.tablePrompt";
+    private static final String KEY_EXPORT_DETAILED_PROMPT = "export.detailedPrompt";
+    private static final String KEY_EXPORT_SUMMARY_PROMPT = "export.summaryPrompt";
+
+    public static final String DEFAULT_EXPORT_TABLE_PROMPT = """
+            Analyze this PlantUML diagram and output a markdown table listing each \
+            interaction/step in order, with these exact columns: Step, From, To, Call. \
+            "Step" is the sequential step number starting at 1, "From" is the sender/source \
+            participant, "To" is the receiver/target participant, "Call" is the message or \
+            action name. Include only the table (a header row, a separator row, and the data \
+            rows) and nothing else.""";
+
+    public static final String DEFAULT_EXPORT_DETAILED_PROMPT = """
+            Analyze this PlantUML diagram and write a detailed overview of it in markdown \
+            format. Include: a short introduction describing what the diagram represents, a \
+            list of all participants/elements with a brief description of each, and a \
+            thorough walkthrough of the interactions/flow shown in the diagram. Use markdown \
+            headings and bullet points where appropriate.""";
+
+    public static final String DEFAULT_EXPORT_SUMMARY_PROMPT = """
+            Analyze this PlantUML diagram and write a short summary of it in markdown format \
+            - no more than 3-5 sentences describing what the diagram shows and its overall \
+            purpose. Do not list every individual step.""";
 
     private String apiKey = "";
     private String baseUrl = "https://api.moonshot.ai/v1";
@@ -25,6 +48,9 @@ public class AppConfig {
     private String editorBackground = "#F7F9FB";
     private String diagramBackground = "#FFFFFF";
     private String chatBackground = "#F7F5FB";
+    private String exportTablePrompt = DEFAULT_EXPORT_TABLE_PROMPT;
+    private String exportDetailedPrompt = DEFAULT_EXPORT_DETAILED_PROMPT;
+    private String exportSummaryPrompt = DEFAULT_EXPORT_SUMMARY_PROMPT;
 
     public static AppConfig load() {
         AppConfig config = new AppConfig();
@@ -38,6 +64,9 @@ public class AppConfig {
                 config.editorBackground = props.getProperty(KEY_EDITOR_BG, config.editorBackground);
                 config.diagramBackground = props.getProperty(KEY_DIAGRAM_BG, config.diagramBackground);
                 config.chatBackground = props.getProperty(KEY_CHAT_BG, config.chatBackground);
+                config.exportTablePrompt = props.getProperty(KEY_EXPORT_TABLE_PROMPT, config.exportTablePrompt);
+                config.exportDetailedPrompt = props.getProperty(KEY_EXPORT_DETAILED_PROMPT, config.exportDetailedPrompt);
+                config.exportSummaryPrompt = props.getProperty(KEY_EXPORT_SUMMARY_PROMPT, config.exportSummaryPrompt);
             } catch (IOException e) {
                 throw new RuntimeException("Failed to read config file: " + CONFIG_FILE, e);
             }
@@ -53,6 +82,9 @@ public class AppConfig {
         props.setProperty(KEY_EDITOR_BG, editorBackground);
         props.setProperty(KEY_DIAGRAM_BG, diagramBackground);
         props.setProperty(KEY_CHAT_BG, chatBackground);
+        props.setProperty(KEY_EXPORT_TABLE_PROMPT, exportTablePrompt);
+        props.setProperty(KEY_EXPORT_DETAILED_PROMPT, exportDetailedPrompt);
+        props.setProperty(KEY_EXPORT_SUMMARY_PROMPT, exportSummaryPrompt);
         try {
             Files.createDirectories(CONFIG_DIR);
             try (OutputStream out = Files.newOutputStream(CONFIG_FILE)) {
@@ -109,5 +141,29 @@ public class AppConfig {
 
     public void setChatBackground(String chatBackground) {
         this.chatBackground = chatBackground;
+    }
+
+    public String getExportTablePrompt() {
+        return exportTablePrompt;
+    }
+
+    public void setExportTablePrompt(String exportTablePrompt) {
+        this.exportTablePrompt = exportTablePrompt;
+    }
+
+    public String getExportDetailedPrompt() {
+        return exportDetailedPrompt;
+    }
+
+    public void setExportDetailedPrompt(String exportDetailedPrompt) {
+        this.exportDetailedPrompt = exportDetailedPrompt;
+    }
+
+    public String getExportSummaryPrompt() {
+        return exportSummaryPrompt;
+    }
+
+    public void setExportSummaryPrompt(String exportSummaryPrompt) {
+        this.exportSummaryPrompt = exportSummaryPrompt;
     }
 }

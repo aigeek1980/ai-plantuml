@@ -21,10 +21,11 @@ import java.security.cert.Certificate;
 import java.time.Duration;
 import java.util.Enumeration;
 import java.util.Locale;
+import java.util.Optional;
 
 public class KimiClient {
 
-    private static final String SYSTEM_PROMPT = """
+    private static final String EDIT_SYSTEM_PROMPT = """
             You are an assistant that edits PlantUML diagrams.
             You will be given the current PlantUML source code and an instruction describing a change.
             Respond with ONLY the complete, updated PlantUML source code.
@@ -33,6 +34,22 @@ public class KimiClient {
             @startsalt/@endsalt, @startgantt/@endgantt) - do not change the diagram type
             unless the instruction explicitly asks for a different kind of diagram.
             Do not include explanations, comments about the change, or markdown code fences.
+            """;
+
+    private static final String QUESTION_SYSTEM_PROMPT = """
+            You are an assistant that answers questions about a PlantUML diagram.
+            You will be given the current PlantUML source code and a question about it.
+            Answer the question clearly and concisely based on the diagram's content.
+            Do not output PlantUML code or rewrite the diagram - only answer the question.
+            """;
+
+    private static final String EXPORT_SYSTEM_PROMPT = """
+            You are an assistant that documents PlantUML diagrams.
+            You will be given the current PlantUML source code and an instruction describing
+            what kind of markdown document to produce.
+            Follow the instruction exactly and respond with ONLY the requested markdown
+            content - no explanations, no commentary, and no markdown code fences wrapping
+            the whole response.
             """;
 
     private final AppConfig config;
@@ -56,7 +73,7 @@ public class KimiClient {
      * machine, with no per-company file to maintain.
      * Falls back to the JVM default (empty Optional) if anything goes wrong.
      */
-    private java.util.Optional<SSLContext> buildTrustingSslContext() {
+    private Optional<SSLContext> buildTrustingSslContext() {
         try {
             KeyStore trustStore = KeyStore.getInstance(KeyStore.getDefaultType());
             String cacertsPath = System.getProperty("java.home") + "/lib/security/cacerts";
@@ -73,9 +90,9 @@ public class KimiClient {
 
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, tmf.getTrustManagers(), null);
-            return java.util.Optional.of(sslContext);
+            return Optional.of(sslContext);
         } catch (IOException | GeneralSecurityException e) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
     }
 
@@ -96,13 +113,35 @@ public class KimiClient {
         }
     }
 
+    /**
+     * Asks the AI to rewrite the diagram per the given instruction. Returns PlantUML source.
+     */
     public String requestEdit(String currentCode, String instruction) throws IOException, InterruptedException {
+        String userPrompt = "Current PlantUML diagram:\n" + currentCode + "\n\nInstruction: " + instruction;
+        return stripMarkdownFence(send(EDIT_SYSTEM_PROMPT, userPrompt));
+    }
+
+    /**
+     * Asks the AI a question about the diagram without modifying it. Returns a plain-text answer.
+     */
+    public String askQuestion(String currentCode, String question) throws IOException, InterruptedException {
+        String userPrompt = "Current PlantUML diagram:\n" + currentCode + "\n\nQuestion: " + question;
+        return send(QUESTION_SYSTEM_PROMPT, userPrompt);
+    }
+
+    /**
+     * Asks the AI to produce a markdown document describing the diagram, per the given
+     * (user-configurable) export instruction. Returns markdown text.
+     */
+    public String generateMarkdown(String currentCode, String exportInstruction) throws IOException, InterruptedException {
+        String userPrompt = "Current PlantUML diagram:\n" + currentCode + "\n\nInstruction: " + exportInstruction;
+        return stripMarkdownFence(send(EXPORT_SYSTEM_PROMPT, userPrompt));
+    }
+
+    private String send(String systemPrompt, String userPrompt) throws IOException, InterruptedException {
         if (config.getApiKey() == null || config.getApiKey().isBlank()) {
             throw new IllegalStateException("No API key configured. Open Settings and add your Kimi API key.");
         }
-
-        String userPrompt = "Current PlantUML diagram:\n" + currentCode
-                + "\n\nInstruction: " + instruction;
 
         ObjectNode root = mapper.createObjectNode();
         root.put("model", config.getModel());
@@ -111,7 +150,7 @@ public class KimiClient {
         ArrayNode messages = root.putArray("messages");
         ObjectNode systemMsg = messages.addObject();
         systemMsg.put("role", "system");
-        systemMsg.put("content", SYSTEM_PROMPT);
+        systemMsg.put("content", systemPrompt);
         ObjectNode userMsg = messages.addObject();
         userMsg.put("role", "user");
         userMsg.put("content", userPrompt);
@@ -141,7 +180,7 @@ public class KimiClient {
             throw new IOException("Unexpected response from Kimi API: " + response.body());
         }
 
-        return stripMarkdownFence(content.asText().trim());
+        return content.asText().trim();
     }
 
     private String stripMarkdownFence(String text) {

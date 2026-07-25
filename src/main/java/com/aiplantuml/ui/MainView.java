@@ -1,10 +1,12 @@
 package com.aiplantuml.ui;
 
+import com.aiplantuml.ai.KimiClient;
 import com.aiplantuml.config.AppConfig;
 import com.aiplantuml.config.WindowState;
 import com.aiplantuml.render.DiagramNodeIndexer;
 import com.aiplantuml.render.PlantUmlRenderer;
 import javafx.animation.PauseTransition;
+import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
@@ -16,6 +18,8 @@ import javafx.scene.control.MenuItem;
 import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
+import javafx.scene.control.Tab;
+import javafx.scene.control.TabPane;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.input.Clipboard;
@@ -65,6 +69,7 @@ public class MainView extends BorderPane {
     private final SplitPane splitPane = new SplitPane();
     private final VirtualizedScrollPane<CodeArea> editorScrollPane = new VirtualizedScrollPane<>(editor);
     private ChatPane chatPane;
+    private QuestionPane questionPane;
 
     private File currentFile;
     private boolean dirty = false;
@@ -88,16 +93,23 @@ public class MainView extends BorderPane {
         diagramScroll.addEventFilter(ScrollEvent.SCROLL, this::onDiagramScroll);
         diagramView.setOnMouseClicked(this::onDiagramClicked);
 
-        MenuItem exportPngContextItem = new MenuItem("Export as PNG...");
-        exportPngContextItem.setOnAction(e -> exportPng());
-        diagramScroll.setContextMenu(new ContextMenu(exportPngContextItem));
+        Menu contextExportMenu = new Menu("Export", null, buildExportMenuItems());
+        diagramScroll.setContextMenu(new ContextMenu(contextExportMenu));
 
         chatPane = new ChatPane(appConfig, editor::getText, code -> {
             editor.replaceText(code);
             renderNow();
         });
+        questionPane = new QuestionPane(appConfig, editor::getText);
 
-        splitPane.getItems().addAll(editorScrollPane, diagramScroll, chatPane);
+        TabPane aiTabPane = new TabPane();
+        Tab editTab = new Tab("Edit Diagram", chatPane);
+        editTab.setClosable(false);
+        Tab askTab = new Tab("Ask Questions", questionPane);
+        askTab.setClosable(false);
+        aiTabPane.getTabs().addAll(editTab, askTab);
+
+        splitPane.getItems().addAll(editorScrollPane, diagramScroll, aiTabPane);
         splitPane.setDividerPositions(windowState.getEditorDivider(), windowState.getDiagramDivider());
         setCenter(splitPane);
 
@@ -126,6 +138,7 @@ public class MainView extends BorderPane {
         BackgroundUtil.applyBackground(editor, appConfig.getEditorBackground());
         BackgroundUtil.applyBackground(diagramScroll, appConfig.getDiagramBackground());
         chatPane.applyBackground(appConfig.getChatBackground());
+        questionPane.applyBackground(appConfig.getChatBackground());
     }
 
     private Region spacer() {
@@ -173,8 +186,7 @@ public class MainView extends BorderPane {
         MenuItem saveAsItem = new MenuItem("Save As...");
         saveAsItem.setOnAction(e -> saveFileAs());
 
-        MenuItem exportPngItem = new MenuItem("Export as PNG...");
-        exportPngItem.setOnAction(e -> exportPng());
+        Menu exportMenu = new Menu("Export", null, buildExportMenuItems());
 
         MenuItem settingsItem = new MenuItem("Settings...");
         settingsItem.setOnAction(e -> new SettingsDialog(appConfig).showAndWait()
@@ -182,7 +194,7 @@ public class MainView extends BorderPane {
                 .ifPresent(saved -> applyPaneBackgrounds()));
 
         Menu fileMenu = new Menu("File", null, newItem, openItem, saveItem, saveAsItem,
-                new SeparatorMenuItem(), exportPngItem,
+                new SeparatorMenuItem(), exportMenu,
                 new SeparatorMenuItem(), settingsItem);
 
         MenuItem renderItem = new MenuItem("Render Now");
@@ -363,6 +375,71 @@ public class MainView extends BorderPane {
         if (file == null) return;
         writeToFile(file);
         rememberDirectory(file);
+    }
+
+    private MenuItem[] buildExportMenuItems() {
+        MenuItem pngItem = new MenuItem("PNG...");
+        pngItem.setOnAction(e -> exportPng());
+
+        MenuItem tableItem = new MenuItem("Steps Table (MD)...");
+        tableItem.setOnAction(e -> exportMarkdown("steps table", appConfig.getExportTablePrompt(), "-steps"));
+
+        MenuItem detailedItem = new MenuItem("Detailed Overview (MD)...");
+        detailedItem.setOnAction(e -> exportMarkdown("detailed overview", appConfig.getExportDetailedPrompt(), "-overview"));
+
+        MenuItem summaryItem = new MenuItem("Summary (MD)...");
+        summaryItem.setOnAction(e -> exportMarkdown("summary", appConfig.getExportSummaryPrompt(), "-summary"));
+
+        return new MenuItem[]{pngItem, tableItem, detailedItem, summaryItem};
+    }
+
+    private void exportMarkdown(String label, String prompt, String fileNameSuffix) {
+        String currentCode = editor.getText();
+        KimiClient client = new KimiClient(appConfig);
+
+        statusLabel.setTextFill(Color.BLACK);
+        statusLabel.setText("Generating " + label + "...");
+
+        Task<String> task = new Task<>() {
+            @Override
+            protected String call() throws Exception {
+                return client.generateMarkdown(currentCode, prompt);
+            }
+        };
+        task.setOnSucceeded(e -> saveMarkdownToFile(task.getValue(), fileNameSuffix));
+        task.setOnFailed(e -> {
+            Throwable ex = task.getException();
+            statusLabel.setTextFill(Color.FIREBRICK);
+            statusLabel.setText("Export failed");
+            showError("Failed to generate " + label, ex != null ? ex.getMessage() : "unknown error");
+        });
+        new Thread(task, "export-markdown").start();
+    }
+
+    private void saveMarkdownToFile(String markdown, String fileNameSuffix) {
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Export as Markdown");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Markdown (*.md)", "*.md"));
+        String baseName = currentFile != null ? stripExtension(currentFile.getName()) : "diagram";
+        if (currentFile != null) {
+            chooser.setInitialDirectory(currentFile.getParentFile());
+        } else {
+            applyInitialDirectory(chooser);
+        }
+        chooser.setInitialFileName(baseName + fileNameSuffix + ".md");
+        File file = chooser.showSaveDialog(stage);
+        if (file == null) {
+            statusLabel.setText("Rendered OK");
+            return;
+        }
+        try {
+            Files.writeString(file.toPath(), markdown, StandardCharsets.UTF_8);
+            rememberDirectory(file);
+            statusLabel.setTextFill(Color.DARKGREEN);
+            statusLabel.setText("Exported to " + file.getName());
+        } catch (IOException ex) {
+            showError("Failed to save markdown file", ex.getMessage());
+        }
     }
 
     private void exportPng() {
