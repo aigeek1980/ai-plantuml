@@ -28,7 +28,10 @@ public class KimiClient {
             You are an assistant that edits PlantUML diagrams.
             You will be given the current PlantUML source code and an instruction describing a change.
             Respond with ONLY the complete, updated PlantUML source code.
-            Always include the @startuml and @enduml lines.
+            Preserve the same @start.../@end... tag pair used in the current diagram
+            (for example @startuml/@enduml, @startmindmap/@endmindmap, @startwbs/@endwbs,
+            @startsalt/@endsalt, @startgantt/@endgantt) - do not change the diagram type
+            unless the instruction explicitly asks for a different kind of diagram.
             Do not include explanations, comments about the change, or markdown code fences.
             """;
 
