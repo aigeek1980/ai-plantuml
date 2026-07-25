@@ -39,12 +39,12 @@ public class ChatPane extends ChatPaneBase {
             setBusy(false);
             String updatedCode = task.getValue();
             onCodeUpdated.accept(updatedCode);
-            appendHistory("AI: diagram updated.");
+            appendAiMessage("Diagram updated.");
         });
         task.setOnFailed(e -> {
             setBusy(false);
             Throwable ex = task.getException();
-            appendHistory("Error: " + (ex != null ? ex.getMessage() : "unknown error"));
+            appendErrorMessage(ex != null ? ex.getMessage() : "unknown error");
         });
         new Thread(task, "kimi-request").start();
     }

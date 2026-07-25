@@ -1,0 +1,37 @@
+/* Toolbar-style chrome: menu bar and status bar get a distinct strip color so they
+   read as UI chrome rather than blending into the pastel content panes below them. */
+.menu-bar {
+    -fx-background-color: #F2F3F5;
+    -fx-border-color: transparent transparent #D8DCE1 transparent;
+    -fx-border-width: 0 0 1 0;
+}
+
+.status-bar {
+    -fx-background-color: #F2F3F5;
+    -fx-border-color: #D8DCE1 transparent transparent transparent;
+    -fx-border-width: 1 0 0 0;
+}
+
+/* Calmer, neutral highlight instead of the default saturated accent blue, for both
+   the top-level menu buttons (File/Diagram/View/Help) and dropdown/context menu items. */
+.menu-bar .menu:hover,
+.menu-bar .menu:showing,
+.menu-bar .menu:focused {
+    -fx-background-color: #E3E6EA;
+}
+
+.menu-item:hover,
+.menu-item:focused {
+    -fx-background-color: #E3E6EA;
+}
+
+.menu-item:hover > .label,
+.menu-item:focused > .label {
+    -fx-text-fill: #1A1A1A;
+}
+
+.context-menu {
+    -fx-background-color: white;
+    -fx-border-color: #D8DCE1;
+    -fx-border-width: 1;
+}

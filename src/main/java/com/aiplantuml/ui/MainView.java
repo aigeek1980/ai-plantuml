@@ -8,6 +8,7 @@ import com.aiplantuml.render.PlantUmlRenderer;
 import javafx.animation.PauseTransition;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
+import javafx.scene.Cursor;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.ContextMenu;
@@ -83,6 +84,7 @@ public class MainView extends BorderPane {
     public MainView(Stage stage) {
         this.stage = stage;
         applyWindowState();
+        getStylesheets().add(getClass().getResource("/app-theme.css").toExternalForm());
 
         editor.setParagraphGraphicFactory(LineNumberFactory.get(editor));
         editor.getStylesheets().add(getClass().getResource("/plantuml-highlighting.css").toExternalForm());
@@ -109,13 +111,23 @@ public class MainView extends BorderPane {
         askTab.setClosable(false);
         aiTabPane.getTabs().addAll(editTab, askTab);
 
-        splitPane.getItems().addAll(editorScrollPane, diagramScroll, aiTabPane);
+        Label aiCaption = new Label("🤖 AI Assistant");
+        aiCaption.setMaxWidth(Double.MAX_VALUE);
+        aiCaption.setStyle("-fx-font-weight: bold; -fx-font-size: 13px; -fx-padding: 8 10 8 10; "
+                + "-fx-background-color: #F0EEFA; "
+                + "-fx-border-color: transparent transparent #DCD6F0 transparent; -fx-border-width: 0 0 1 0;");
+        BorderPane aiPanel = new BorderPane();
+        aiPanel.setTop(aiCaption);
+        aiPanel.setCenter(aiTabPane);
+
+        splitPane.getItems().addAll(editorScrollPane, diagramScroll, aiPanel);
         splitPane.setDividerPositions(windowState.getEditorDivider(), windowState.getDiagramDivider());
         setCenter(splitPane);
 
         setTop(buildMenuBar());
 
         HBox statusBar = new HBox(statusLabel, spacer(), zoomLabel);
+        statusBar.getStyleClass().add("status-bar");
         statusBar.setPadding(new Insets(4, 8, 4, 8));
         setBottom(statusBar);
 
@@ -399,6 +411,7 @@ public class MainView extends BorderPane {
 
         statusLabel.setTextFill(Color.BLACK);
         statusLabel.setText("Generating " + label + "...");
+        setAppBusy(true);
 
         Task<String> task = new Task<>() {
             @Override
@@ -406,14 +419,30 @@ public class MainView extends BorderPane {
                 return client.generateMarkdown(currentCode, prompt);
             }
         };
-        task.setOnSucceeded(e -> saveMarkdownToFile(task.getValue(), fileNameSuffix));
+        task.setOnSucceeded(e -> {
+            setAppBusy(false);
+            saveMarkdownToFile(task.getValue(), fileNameSuffix);
+        });
         task.setOnFailed(e -> {
+            setAppBusy(false);
             Throwable ex = task.getException();
             statusLabel.setTextFill(Color.FIREBRICK);
             statusLabel.setText("Export failed");
             showError("Failed to generate " + label, ex != null ? ex.getMessage() : "unknown error");
         });
         new Thread(task, "export-markdown").start();
+    }
+
+    /**
+     * Disables the whole window (menu, editor, diagram, AI tabs) and shows a wait
+     * cursor while a blocking async operation (like an export AI call) is in flight,
+     * so it's clear something is happening rather than the app looking unresponsive.
+     */
+    private void setAppBusy(boolean busy) {
+        setDisable(busy);
+        if (getScene() != null) {
+            getScene().setCursor(busy ? Cursor.WAIT : Cursor.DEFAULT);
+        }
     }
 
     private void saveMarkdownToFile(String markdown, String fileNameSuffix) {

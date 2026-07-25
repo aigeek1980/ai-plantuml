@@ -34,12 +34,12 @@ public class QuestionPane extends ChatPaneBase {
         };
         task.setOnSucceeded(e -> {
             setBusy(false);
-            appendHistory("AI: " + task.getValue());
+            appendAiMessage(task.getValue());
         });
         task.setOnFailed(e -> {
             setBusy(false);
             Throwable ex = task.getException();
-            appendHistory("Error: " + (ex != null ? ex.getMessage() : "unknown error"));
+            appendErrorMessage(ex != null ? ex.getMessage() : "unknown error");
         });
         new Thread(task, "kimi-question").start();
     }

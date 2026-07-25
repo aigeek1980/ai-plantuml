@@ -7,12 +7,14 @@ import javafx.scene.control.Label;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
+import javafx.stage.Stage;
 
 public class AboutDialog extends Dialog<Void> {
 
     public AboutDialog() {
         setTitle("About AI PlantUML");
         setHeaderText(null);
+        AppIcons.applyTo((Stage) getDialogPane().getScene().getWindow());
 
         Label titleLabel = new Label("AI PlantUML");
         titleLabel.setFont(Font.font(null, FontWeight.BOLD, 18));
