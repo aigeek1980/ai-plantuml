@@ -200,7 +200,11 @@ public class MainView extends BorderPane {
 
         Menu viewMenu = new Menu("View", null, zoomInItem, zoomOutItem, zoomResetItem);
 
-        return new MenuBar(fileMenu, diagramMenu, viewMenu);
+        MenuItem aboutItem = new MenuItem("About");
+        aboutItem.setOnAction(e -> new AboutDialog().showAndWait());
+        Menu helpMenu = new Menu("Help", null, aboutItem);
+
+        return new MenuBar(fileMenu, diagramMenu, viewMenu, helpMenu);
     }
 
     private void onDiagramClicked(MouseEvent event) {
