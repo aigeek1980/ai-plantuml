@@ -20,12 +20,14 @@ $dest = "$root\target\installer"
 if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
 
 Write-Host "Running jpackage..."
-# --add-modules jdk.crypto.mscapi: jpackage/jlink auto-detects required JDK modules by
-# statically analyzing the classpath, but KimiClient looks up the "Windows-ROOT" keystore
-# by name at runtime (KeyStore.getInstance("Windows-ROOT")), which that static analysis
-# can't see - so the module (and its native sunmscapi.dll) gets silently left out of the
-# bundled runtime unless requested explicitly here. Without it, the packaged app falls
-# back to the JVM's default CAs only and fails behind a TLS-intercepting corporate proxy.
+# --add-modules ALL-MODULE-PATH: bundle every JDK module rather than jpackage/jlink's
+# static classpath-analysis default. That auto-detection misses modules only referenced
+# via runtime string lookups (e.g. KimiClient's KeyStore.getInstance("Windows-ROOT"),
+# which needs jdk.crypto.mscapi) - and passing --add-modules with a specific module name
+# REPLACES the auto-detected set rather than adding to it, which previously produced a
+# runtime with only java.base + jdk.crypto.mscapi and nothing else, so the JVM couldn't
+# even start. Bundling everything trades some installer size for not having this class of
+# bug resurface every time some library does a reflective/service-loader/JCA lookup.
 jpackage `
     --type app-image `
     --input "$root\target\jpackage-input" `
@@ -37,7 +39,7 @@ jpackage `
     --app-version $version `
     --vendor "AI PlantUML" `
     --description "PlantUML editor with AI-assisted diagram editing" `
-    --add-modules jdk.crypto.mscapi
+    --add-modules ALL-MODULE-PATH
 if ($LASTEXITCODE -ne 0) { throw "jpackage failed" }
 
 $zipPath = "$dest\AI-PlantUML-$version-win.zip"
