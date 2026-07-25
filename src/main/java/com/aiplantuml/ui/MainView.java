@@ -8,6 +8,7 @@ import javafx.animation.PauseTransition;
 import javafx.geometry.Insets;
 import javafx.scene.control.Alert;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
@@ -72,6 +73,7 @@ public class MainView extends BorderPane {
     private double zoomFactor = 1.0;
     private List<DiagramNodeIndexer.NodeArea> nodeAreas = List.of();
     private Map<String, Integer> nodeLineNumbers = Map.of();
+    private byte[] lastRenderedPng;
 
     public MainView(Stage stage) {
         this.stage = stage;
@@ -85,6 +87,10 @@ public class MainView extends BorderPane {
         diagramView.setPreserveRatio(true);
         diagramScroll.addEventFilter(ScrollEvent.SCROLL, this::onDiagramScroll);
         diagramView.setOnMouseClicked(this::onDiagramClicked);
+
+        MenuItem exportPngContextItem = new MenuItem("Export as PNG...");
+        exportPngContextItem.setOnAction(e -> exportPng());
+        diagramScroll.setContextMenu(new ContextMenu(exportPngContextItem));
 
         chatPane = new ChatPane(appConfig, editor::getText, code -> {
             editor.replaceText(code);
@@ -167,12 +173,16 @@ public class MainView extends BorderPane {
         MenuItem saveAsItem = new MenuItem("Save As...");
         saveAsItem.setOnAction(e -> saveFileAs());
 
+        MenuItem exportPngItem = new MenuItem("Export as PNG...");
+        exportPngItem.setOnAction(e -> exportPng());
+
         MenuItem settingsItem = new MenuItem("Settings...");
         settingsItem.setOnAction(e -> new SettingsDialog(appConfig).showAndWait()
                 .filter(Boolean.TRUE::equals)
                 .ifPresent(saved -> applyPaneBackgrounds()));
 
         Menu fileMenu = new Menu("File", null, newItem, openItem, saveItem, saveAsItem,
+                new SeparatorMenuItem(), exportPngItem,
                 new SeparatorMenuItem(), settingsItem);
 
         MenuItem renderItem = new MenuItem("Render Now");
@@ -351,6 +361,38 @@ public class MainView extends BorderPane {
         rememberDirectory(file);
     }
 
+    private void exportPng() {
+        if (lastRenderedPng == null) {
+            showError("Nothing to export", "Render a diagram first.");
+            return;
+        }
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Export diagram as PNG");
+        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("PNG image (*.png)", "*.png"));
+        if (currentFile != null) {
+            chooser.setInitialDirectory(currentFile.getParentFile());
+            chooser.setInitialFileName(stripExtension(currentFile.getName()) + ".png");
+        } else {
+            applyInitialDirectory(chooser);
+            chooser.setInitialFileName("diagram.png");
+        }
+        File file = chooser.showSaveDialog(stage);
+        if (file == null) return;
+        try {
+            Files.write(file.toPath(), lastRenderedPng);
+            rememberDirectory(file);
+            statusLabel.setTextFill(Color.DARKGREEN);
+            statusLabel.setText("Exported to " + file.getName());
+        } catch (IOException ex) {
+            showError("Failed to export PNG", ex.getMessage());
+        }
+    }
+
+    private String stripExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 ? name.substring(0, dot) : name;
+    }
+
     private void writeToFile(File file) {
         try {
             Files.writeString(file.toPath(), editor.getText(), StandardCharsets.UTF_8);
@@ -386,6 +428,7 @@ public class MainView extends BorderPane {
         }
         diagramView.setImage(new Image(new ByteArrayInputStream(result.png())));
         applyZoom();
+        lastRenderedPng = result.png();
         nodeAreas = result.nodeAreas();
         nodeLineNumbers = result.nodeLineNumbers();
         statusLabel.setTextFill(Color.DARKGREEN);
