@@ -1,0 +1,36 @@
+.code-area {
+    -fx-font-family: 'Consolas', monospace;
+    -fx-font-size: 13px;
+}
+
+.puml-keyword {
+    -fx-fill: #7A3E9D;
+    -fx-font-weight: bold;
+}
+
+.puml-string {
+    -fx-fill: #CE7B00;
+}
+
+.puml-comment {
+    -fx-fill: #808080;
+    -fx-font-style: italic;
+}
+
+.puml-stereotype {
+    -fx-fill: #6A8759;
+}
+
+.puml-directive {
+    -fx-fill: #0033B3;
+    -fx-font-weight: bold;
+}
+
+.puml-color {
+    -fx-fill: #1750EB;
+}
+
+.lineno {
+    -fx-background-color: #f2f2f2;
+    -fx-text-fill: #999999;
+}
