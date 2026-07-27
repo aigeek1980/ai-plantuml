@@ -1,26 +1,28 @@
 package com.aiplantuml.ui;
 
-import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.scene.control.Button;
-import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
-import javafx.scene.control.ScrollPane;
 import javafx.scene.control.TextField;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
-import javafx.scene.layout.VBox;
-import javafx.scene.text.Text;
-import javafx.scene.text.TextFlow;
+import org.fxmisc.flowless.VirtualizedScrollPane;
+import org.fxmisc.richtext.InlineCssTextArea;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Shared scaffolding for a simple chat-style panel: a scrolling list of sender-labeled
- * message entries, a single-line input, a send button, and a busy indicator. Subclasses
- * implement {@link #onSend(String)} to decide what happens with the submitted text.
+ * Shared scaffolding for a simple chat-style panel: a scrolling, selectable/copyable
+ * history of sender-labeled messages, a single-line input, a send button, and a busy
+ * indicator. Subclasses implement {@link #onSend(String)} to decide what happens with
+ * the submitted text.
+ * <p>
+ * The history is an InlineCssTextArea (read-only) rather than plain Text/TextFlow
+ * nodes, since RichTextFX's styled text areas support both per-range inline styling
+ * (bold sender labels, markdown) and normal click-drag text selection + Ctrl+C, which
+ * plain TextFlow does not.
  */
 public abstract class ChatPaneBase extends BorderPane {
 
@@ -31,16 +33,16 @@ public abstract class ChatPaneBase extends BorderPane {
     private static final String ERROR_COLOR = "#C0392B";
     private static final String SYSTEM_COLOR = "#6B7280";
 
-    private final VBox messageList = new VBox(10);
-    private final ScrollPane historyScroll = new ScrollPane(messageList);
+    private final InlineCssTextArea history = new InlineCssTextArea();
     private final TextField input = new TextField();
     private final Button sendButton;
     private final ProgressIndicator progress = new ProgressIndicator();
 
     protected ChatPaneBase(String buttonLabel, String promptText, String greeting) {
-        messageList.setPadding(new Insets(8));
-        historyScroll.setFitToWidth(true);
-        VBox.setVgrow(historyScroll, Priority.ALWAYS);
+        history.setEditable(false);
+        history.setWrapText(true);
+        history.setStyle("-fx-font-family: 'Segoe UI', sans-serif; -fx-font-size: 13px;");
+        VirtualizedScrollPane<InlineCssTextArea> historyScroll = new VirtualizedScrollPane<>(history);
         setCenter(historyScroll);
 
         input.setPromptText(promptText);
@@ -62,6 +64,7 @@ public abstract class ChatPaneBase extends BorderPane {
 
     public void applyBackground(String hex) {
         BackgroundUtil.applyBackground(this, hex);
+        BackgroundUtil.applyBackground(history, hex);
     }
 
     private void send() {
@@ -97,52 +100,49 @@ public abstract class ChatPaneBase extends BorderPane {
     }
 
     protected void appendSystemMessage(String text) {
-        Text note = new Text(text);
-        note.setStyle("-fx-fill: " + SYSTEM_COLOR + "; -fx-font-style: italic;");
-        TextFlow flow = new TextFlow(note);
-        flow.setMaxWidth(Double.MAX_VALUE);
-        addEntry(flow);
+        appendStyledText(text + "\n\n", "-fx-fill: " + SYSTEM_COLOR + "; -fx-font-style: italic;");
+        scrollToEnd();
     }
 
     private void appendMessage(String sender, String color, String text) {
-        Label senderLabel = new Label(sender);
-        senderLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: " + color + "; -fx-font-size: 12px;");
-
-        TextFlow contentFlow = renderInlineMarkdown(text);
-        contentFlow.setMaxWidth(Double.MAX_VALUE);
-
-        VBox entry = new VBox(3, senderLabel, contentFlow);
-        addEntry(entry);
+        if (!history.getText().isEmpty()) {
+            appendStyledText("\n", "");
+        }
+        appendStyledText(sender + "\n", "-fx-fill: " + color + "; -fx-font-weight: bold;");
+        appendInlineMarkdown(text);
+        appendStyledText("\n", "");
+        scrollToEnd();
     }
 
-    private void addEntry(javafx.scene.Node node) {
-        messageList.getChildren().add(node);
-        Platform.runLater(() -> historyScroll.setVvalue(1.0));
-    }
-
-    private TextFlow renderInlineMarkdown(String text) {
-        TextFlow flow = new TextFlow();
-        flow.setLineSpacing(2);
+    private void appendInlineMarkdown(String text) {
         Matcher matcher = INLINE_MARKDOWN.matcher(text);
         int lastEnd = 0;
         while (matcher.find()) {
             if (matcher.start() > lastEnd) {
-                flow.getChildren().add(new Text(text.substring(lastEnd, matcher.start())));
+                appendStyledText(text.substring(lastEnd, matcher.start()), "");
             }
             if (matcher.group(1) != null) {
-                Text bold = new Text(matcher.group(1));
-                bold.setStyle("-fx-font-weight: bold;");
-                flow.getChildren().add(bold);
+                appendStyledText(matcher.group(1), "-fx-font-weight: bold;");
             } else if (matcher.group(2) != null) {
-                Text code = new Text(matcher.group(2));
-                code.setStyle("-fx-font-family: 'Consolas', monospace; -fx-fill: #A31515;");
-                flow.getChildren().add(code);
+                appendStyledText(matcher.group(2), "-fx-font-family: 'Consolas', monospace; -fx-fill: #A31515;");
             }
             lastEnd = matcher.end();
         }
         if (lastEnd < text.length()) {
-            flow.getChildren().add(new Text(text.substring(lastEnd)));
+            appendStyledText(text.substring(lastEnd), "");
         }
-        return flow;
+    }
+
+    private void appendStyledText(String text, String css) {
+        int start = history.getLength();
+        history.appendText(text);
+        if (!css.isEmpty()) {
+            history.setStyle(start, history.getLength(), css);
+        }
+    }
+
+    private void scrollToEnd() {
+        history.moveTo(history.getLength());
+        history.requestFollowCaret();
     }
 }
