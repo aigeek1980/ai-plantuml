@@ -162,7 +162,7 @@ public class KimiClient {
 
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + "/chat/completions"))
-                .timeout(Duration.ofSeconds(60))
+                .timeout(Duration.ofSeconds(config.getAiTimeoutSeconds()))
                 .header("Content-Type", "application/json")
                 .header("Authorization", "Bearer " + config.getApiKey())
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))

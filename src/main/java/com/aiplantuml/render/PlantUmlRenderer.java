@@ -10,6 +10,14 @@ import java.util.Map;
 
 public class PlantUmlRenderer {
 
+    static {
+        // PlantUML refuses to render images past this many pixels on either axis (default
+        // 4096), silently cropping large diagrams instead of erroring. Raise it well past
+        // what any reasonable diagram in this app needs. Must be set before the first
+        // render call - PlantUML reads it once via System.getProperty, not per-call.
+        System.setProperty("PLANTUML_LIMIT_SIZE", "16384");
+    }
+
     private final DiagramNodeIndexer nodeIndexer = new DiagramNodeIndexer();
 
     public record RenderResult(byte[] png, String errorText, List<DiagramNodeIndexer.NodeArea> nodeAreas,
