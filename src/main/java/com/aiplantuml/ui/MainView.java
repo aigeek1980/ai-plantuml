@@ -66,7 +66,7 @@ public class MainView extends BorderPane {
     private final ScrollPane diagramScroll = new ScrollPane(diagramView);
     private final Label statusLabel = new Label();
     private final Label zoomLabel = new Label("100%");
-    private final PauseTransition debounce = new PauseTransition(Duration.millis(400));
+    private final PauseTransition debounce = new PauseTransition(Duration.millis(1000));
     private final SplitPane splitPane = new SplitPane();
     private final VirtualizedScrollPane<CodeArea> editorScrollPane = new VirtualizedScrollPane<>(editor);
     private ChatPane chatPane;

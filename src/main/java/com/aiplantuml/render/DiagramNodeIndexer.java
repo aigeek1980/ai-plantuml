@@ -73,14 +73,35 @@ public class DiagramNodeIndexer {
         List<String> implicitNamesInOrder = new ArrayList<>();
         List<String> outputLines = new ArrayList<>();
         Map<String, Integer> nodeLineNumbers = new LinkedHashMap<>();
+        boolean insideNote = false;
 
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
             String trimmed = line.strip();
             String lower = trimmed.toLowerCase();
-            boolean skip = trimmed.isEmpty() || trimmed.startsWith("@")
-                    || lower.startsWith("'") || lower.startsWith("!")
-                    || SKIP_LINE_PREFIXES.contains(firstWord(lower));
+            String firstWord = firstWord(lower);
+            boolean skip;
+
+            if (insideNote) {
+                // Free-text note body - never a declaration/arrow, no matter what it
+                // contains (identifiers, punctuation, anything). Only "end note" (etc.)
+                // exits the block; it's already covered by SKIP_LINE_PREFIXES's "end".
+                skip = true;
+                if (firstWord.equals("end")) {
+                    insideNote = false;
+                }
+            } else {
+                skip = trimmed.isEmpty() || trimmed.startsWith("@")
+                        || lower.startsWith("'") || lower.startsWith("!")
+                        || SKIP_LINE_PREFIXES.contains(firstWord);
+                // A bare "note right"/"note left of Alice"/etc. (no ":" inline text)
+                // opens a multi-line block whose body lines don't start with "note" and
+                // would otherwise be scanned as if they were diagram syntax.
+                if (skip && (firstWord.equals("note") || firstWord.equals("hnote") || firstWord.equals("rnote"))
+                        && !trimmed.contains(":")) {
+                    insideNote = true;
+                }
+            }
 
             if (!skip && !line.contains("[[")) {
                 Matcher declMatcher = DECLARATION.matcher(line);
