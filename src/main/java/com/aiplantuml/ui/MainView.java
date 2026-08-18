@@ -25,6 +25,7 @@ import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
+import javafx.scene.control.Tooltip;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.KeyCode;
@@ -84,8 +85,8 @@ public class MainView extends BorderPane {
     private final WindowState windowState = WindowState.load();
     private double zoomFactor = 1.0;
     private Map<String, Integer> nodeLineNumbers = Map.of();
-    private boolean editorCollapsed = false;
-    private double editorDividerPositionBeforeCollapse = 0.3;
+    private CollapseToggle editorToggle;
+    private CollapseToggle aiToggle;
     private final DoubleProperty aiPromptHeight = new SimpleDoubleProperty();
 
     public MainView(Stage stage) {
@@ -130,10 +131,20 @@ public class MainView extends BorderPane {
         aiPanel.setTop(aiCaption);
         aiPanel.setCenter(aiTabPane);
 
-        StackPane editorPane = new StackPane(editorScrollPane, buildEditorCollapseButton());
-        StackPane.setAlignment(editorScrollPane, Pos.CENTER);
+        editorToggle = new CollapseToggle(0, 0.0, windowState.getEditorDivider(),
+                "‹", "›", Pos.CENTER_LEFT, "Collapse/expand the editor");
+        aiToggle = new CollapseToggle(1, 1.0, windowState.getDiagramDivider(),
+                "›", "‹", Pos.CENTER_RIGHT, "Collapse/expand the AI assistant");
 
-        splitPane.getItems().addAll(editorPane, diagramView, aiPanel);
+        StackPane diagramPane = new StackPane(diagramView, editorToggle.node(), aiToggle.node());
+
+        // A SplitPane won't drag a divider past an item's minimum width, and these panes
+        // derive a non-zero one from their content - so "collapsed" would otherwise leave
+        // a visible sliver rather than hiding the pane.
+        editorScrollPane.setMinWidth(0);
+        aiPanel.setMinWidth(0);
+
+        splitPane.getItems().addAll(editorScrollPane, diagramPane, aiPanel);
         splitPane.setDividerPositions(windowState.getEditorDivider(), windowState.getDiagramDivider());
         setCenter(splitPane);
 
@@ -199,32 +210,68 @@ public class MainView extends BorderPane {
     }
 
     /**
-     * A small "collapse the editor pane" toggle, overlaid on the right edge of the
-     * editor pane itself (right where it meets the divider) rather than injected into
-     * the SplitPane divider's own internal skin node - that node isn't guaranteed to
-     * exist/keep a stable size across skin implementations, so a button added to it
-     * could silently render with zero visible area.
+     * Collapses one of the outer split panes flush against its divider, and restores it
+     * to the width it had beforehand.
+     * <p>
+     * Both toggles are overlaid on the middle (diagram) pane rather than on the pane
+     * each one collapses. A button placed on its own pane disappears along with it once
+     * that pane is collapsed to zero width, leaving no way to expand it again; the
+     * diagram pane is never collapsible, so buttons there always stay reachable. They
+     * also aren't injected into the SplitPane divider's own skin node, which isn't
+     * guaranteed to exist or keep a usable size across skin implementations.
      */
-    private Button buildEditorCollapseButton() {
-        Button collapseButton = new Button("‹");
-        collapseButton.getStyleClass().add("split-collapse-button");
-        collapseButton.setFocusTraversable(false);
-        collapseButton.setOnAction(e -> toggleEditorCollapse(collapseButton));
-        StackPane.setAlignment(collapseButton, Pos.CENTER_RIGHT);
-        return collapseButton;
-    }
+    private final class CollapseToggle {
 
-    private void toggleEditorCollapse(Button collapseButton) {
-        SplitPane.Divider divider = splitPane.getDividers().get(0);
-        if (editorCollapsed) {
-            divider.setPosition(editorDividerPositionBeforeCollapse);
-            collapseButton.setText("‹");
-        } else {
-            editorDividerPositionBeforeCollapse = divider.getPosition();
-            divider.setPosition(0.0);
-            collapseButton.setText("›");
+        private final Button button = new Button();
+        private final int dividerIndex;
+        private final double collapsedPosition;
+        private final String collapseGlyph;
+        private final String expandGlyph;
+        private double restorePosition;
+        private boolean collapsed;
+
+        CollapseToggle(int dividerIndex, double collapsedPosition, double initialRestorePosition,
+                       String collapseGlyph, String expandGlyph, Pos side, String tooltip) {
+            this.dividerIndex = dividerIndex;
+            this.collapsedPosition = collapsedPosition;
+            this.restorePosition = initialRestorePosition;
+            this.collapseGlyph = collapseGlyph;
+            this.expandGlyph = expandGlyph;
+
+            button.setText(collapseGlyph);
+            button.getStyleClass().add("split-collapse-button");
+            button.setFocusTraversable(false);
+            button.setTooltip(new Tooltip(tooltip));
+            button.setOnAction(e -> toggle());
+            StackPane.setAlignment(button, side);
         }
-        editorCollapsed = !editorCollapsed;
+
+        private void toggle() {
+            SplitPane.Divider divider = splitPane.getDividers().get(dividerIndex);
+            if (collapsed) {
+                divider.setPosition(restorePosition);
+                button.setText(collapseGlyph);
+            } else {
+                restorePosition = divider.getPosition();
+                divider.setPosition(collapsedPosition);
+                button.setText(expandGlyph);
+            }
+            collapsed = !collapsed;
+        }
+
+        /**
+         * The width to remember across restarts. While collapsed the divider itself sits
+         * at the collapsed position, and persisting that would reopen the app with the
+         * pane missing - and, since the restore width would have been lost, no way to
+         * get it back.
+         */
+        double positionToPersist() {
+            return collapsed ? restorePosition : splitPane.getDividers().get(dividerIndex).getPosition();
+        }
+
+        Button node() {
+            return button;
+        }
     }
 
     private void applyWindowState() {
@@ -243,10 +290,9 @@ public class MainView extends BorderPane {
             windowState.setHeight(stage.getHeight());
         }
         windowState.setMaximized(stage.isMaximized());
-        double[] dividers = splitPane.getDividerPositions();
-        if (dividers.length >= 2) {
-            windowState.setEditorDivider(dividers[0]);
-            windowState.setDiagramDivider(dividers[1]);
+        if (splitPane.getDividers().size() >= 2) {
+            windowState.setEditorDivider(editorToggle.positionToPersist());
+            windowState.setDiagramDivider(aiToggle.positionToPersist());
         }
         windowState.setAiPromptHeight(aiPromptHeight.get());
         windowState.save();
