@@ -367,6 +367,12 @@ public class MainView extends BorderPane {
         int lineEnd = offset + lines[lineIndex].length();
         editor.requestFocus();
         editor.selectRange(offset, lineEnd);
+        // Selecting a range highlights it but leaves the viewport where it was, so a
+        // jump to an off-screen line would silently do nothing visible. Center the
+        // target line instead of merely nudging it into view, so the surrounding
+        // context is visible too.
+        editor.showParagraphAtCenter(lineIndex);
+        editor.requestFollowCaret();
     }
 
     private void onDiagramScroll(ScrollEvent event) {
@@ -645,14 +651,55 @@ public class MainView extends BorderPane {
      * Wraps the raw SVG in a minimal HTML document. The margin/padding reset stops the
      * browser's default body margin from offsetting the diagram, and cursor:pointer on
      * linked elements makes clickable nodes discoverable on hover.
+     * <p>
+     * The script restores click-drag panning, which came free from the old ScrollPane
+     * but has no WebView equivalent - important for large diagrams where scrollbars
+     * alone are awkward. A drag past a few pixels is treated as a pan rather than a
+     * click, and the click that follows it is swallowed in the capture phase so panning
+     * over a node doesn't also navigate to it.
      */
     private String wrapSvg(String svg) {
         return """
                 <!DOCTYPE html>
                 <html><head><meta charset="utf-8"><style>
-                  html, body { margin: 0; padding: 0; background: %s; }
+                  html, body { margin: 0; padding: 0; background: %s;
+                               cursor: grab; user-select: none; }
+                  body.panning { cursor: grabbing; }
                   a { cursor: pointer; }
-                </style></head><body>%s</body></html>
+                </style></head><body>%s<script>
+                (function () {
+                  var PAN_THRESHOLD = 4;
+                  var down = false, panned = false, lastX = 0, lastY = 0;
+
+                  document.addEventListener('mousedown', function (e) {
+                    if (e.button !== 0) return;
+                    down = true; panned = false;
+                    lastX = e.clientX; lastY = e.clientY;
+                  });
+
+                  document.addEventListener('mousemove', function (e) {
+                    if (!down) return;
+                    var dx = e.clientX - lastX, dy = e.clientY - lastY;
+                    if (!panned && Math.abs(dx) + Math.abs(dy) < PAN_THRESHOLD) return;
+                    if (!panned) { panned = true; document.body.classList.add('panning'); }
+                    window.scrollBy(-dx, -dy);
+                    lastX = e.clientX; lastY = e.clientY;
+                    e.preventDefault();
+                  });
+
+                  document.addEventListener('mouseup', function () {
+                    down = false;
+                    document.body.classList.remove('panning');
+                  });
+
+                  document.addEventListener('click', function (e) {
+                    if (!panned) return;
+                    panned = false;
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }, true);
+                })();
+                </script></body></html>
                 """.formatted(appConfig.getDiagramBackground(), svg);
     }
 }
