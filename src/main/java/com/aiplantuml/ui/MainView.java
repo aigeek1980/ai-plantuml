@@ -384,14 +384,18 @@ public class MainView extends BorderPane {
             if (!(event.getTarget() instanceof org.w3c.dom.Node clicked)) return;
 
             // The click lands on whatever shape or text sits inside the link, so walk
-            // outwards to find the anchor that encloses it.
+            // outwards to find the anchor that encloses it - or, for a node whose box was
+            // tagged because its link covers only the label, the tag itself.
             String href = null;
             for (org.w3c.dom.Node n = clicked; n != null && href == null; n = n.getParentNode()) {
-                if (n instanceof org.w3c.dom.Element element && "a".equalsIgnoreCase(element.getTagName())) {
+                if (!(n instanceof org.w3c.dom.Element element)) continue;
+                if ("a".equalsIgnoreCase(element.getTagName())) {
                     href = element.getAttribute("xlink:href");
                     if (href == null || href.isBlank()) {
                         href = element.getAttribute("href");
                     }
+                } else if (element.hasAttribute("data-node-href")) {
+                    href = element.getAttribute("data-node-href");
                 }
             }
             if (href == null || !href.startsWith(DiagramNodeIndexer.LINK_PREFIX)) return;
@@ -724,9 +728,49 @@ public class MainView extends BorderPane {
                 <html><head><meta charset="utf-8"><style>
                   html, body { margin: 0; padding: 0; background: %s; cursor: grab; }
                   html, body, svg, svg * { -webkit-user-select: none; user-select: none; }
+                  /* PlantUML sizes each label with textLength + lengthAdjust="spacing",
+                     measured against the literal source text. HTML collapses runs of
+                     whitespace, so a label written with two consecutive spaces renders
+                     narrower than measured and the glyphs get splayed across the declared
+                     width to compensate. Keeping the spacing intact keeps the two in step. */
+                  svg text { white-space: pre; }
                   body.panning { cursor: grabbing; }
                   a { cursor: pointer; -webkit-user-drag: none; }
                 </style></head><body>%s<script>
+                // PlantUML wraps a sequence participant's box and label together in one
+                // link, but a mindmap node's link covers only its text - so clicking the
+                // node's coloured box, which is what you actually aim at, hits nothing.
+                // Tag each such node's background with its link so the whole box works.
+                window.addEventListener('load', function () {
+                  var LINK = 'node://';
+                  var shapes = document.querySelectorAll('rect, path, polygon, ellipse');
+                  var boxes = [];
+                  for (var s = 0; s < shapes.length; s++) {
+                    boxes.push({ el: shapes[s], r: shapes[s].getBoundingClientRect() });
+                  }
+                  var anchors = document.querySelectorAll('a');
+                  for (var i = 0; i < anchors.length; i++) {
+                    var a = anchors[i];
+                    var href = a.getAttribute('href')
+                            || a.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
+                    if (!href || href.indexOf(LINK) !== 0) continue;
+                    if (a.querySelector('rect, path, polygon, ellipse')) continue;
+                    var t = a.getBoundingClientRect();
+                    if (!t.width) continue;
+                    // The smallest shape enclosing the label is its own box; anything
+                    // larger is an ancestor grouping several nodes together.
+                    var best = null, bestArea = Infinity;
+                    for (var b = 0; b < boxes.length; b++) {
+                      var r = boxes[b].r;
+                      if (r.left > t.left + 1 || r.top > t.top + 1) continue;
+                      if (r.right < t.right - 1 || r.bottom < t.bottom - 1) continue;
+                      var area = r.width * r.height;
+                      if (area < bestArea) { bestArea = area; best = boxes[b].el; }
+                    }
+                    if (best) { best.setAttribute('data-node-href', href); }
+                  }
+                });
+
                 (function () {
                   var PAN_THRESHOLD = 4;
                   var down = false, panned = false, lastX = 0, lastY = 0;
@@ -744,6 +788,7 @@ public class MainView extends BorderPane {
                   }
 
                   function endPan() {
+                    if (!down) return;
                     down = false;
                     document.body.classList.remove('panning');
                   }
