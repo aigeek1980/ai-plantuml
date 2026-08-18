@@ -21,7 +21,8 @@ Grab the latest self-contained Windows build from [Releases](https://github.com/
   - Summary (Markdown) - a short summary
   - Each Markdown export uses a default AI prompt that's fully editable in Settings
   - The window locks with a wait cursor while an export's AI call is in flight, so it's clear something is happening
-- Zoom, pan, and double-click a diagram node to copy its name and jump the editor cursor to its source line
+- Diagrams render as SVG, so zooming stays crisp at any level
+- Click any participant *or any individual call* in the diagram to copy its name and jump the editor cursor straight to its source line; drag anywhere to pan
 - Open/save `.puml` files, remembers the last-used folder
 - Configurable pane background colors, remembered window size/position/layout
 - Runs entirely locally: rendering happens in-process (PlantUML is used as a Java library), no external rendering service
