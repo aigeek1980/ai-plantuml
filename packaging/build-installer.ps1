@@ -7,7 +7,7 @@
 # recipients just unzip and run the .exe, no Java install needed on their machine.
 
 $ErrorActionPreference = "Stop"
-$version = "1.6.0"
+$version = "1.6.1"
 
 $root = Resolve-Path "$PSScriptRoot\.."
 Set-Location $root
@@ -28,6 +28,11 @@ Write-Host "Running jpackage..."
 # runtime with only java.base + jdk.crypto.mscapi and nothing else, so the JVM couldn't
 # even start. Bundling everything trades some installer size for not having this class of
 # bug resurface every time some library does a reflective/service-loader/JCA lookup.
+# --java-options MinHeapFreeRatio/MaxHeapFreeRatio: by default the JVM barely shrinks the
+# heap once it's grown (it tolerates up to ~70% free space before giving any back to the
+# OS), so after rendering one large diagram the process just sits there holding that
+# memory for the rest of the session. These make the GC hand committed-but-unused heap
+# back to the OS once free space exceeds 20%, instead of hoarding it.
 jpackage `
     --type app-image `
     --input "$root\target\jpackage-input" `
@@ -39,7 +44,8 @@ jpackage `
     --app-version $version `
     --vendor "AI PlantUML" `
     --description "PlantUML editor with AI-assisted diagram editing" `
-    --add-modules ALL-MODULE-PATH
+    --add-modules ALL-MODULE-PATH `
+    --java-options "-XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=20"
 if ($LASTEXITCODE -ne 0) { throw "jpackage failed" }
 
 $zipPath = "$dest\AI-PlantUML-$version-win.zip"
