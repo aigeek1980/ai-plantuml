@@ -13,6 +13,7 @@ import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.Region;
 import javafx.scene.layout.VBox;
 import org.fxmisc.flowless.VirtualizedScrollPane;
 import org.fxmisc.richtext.InlineCssTextArea;
@@ -73,9 +74,14 @@ public abstract class ChatPaneBase extends BorderPane {
 
         sendButton = new Button(buttonLabel);
         sendButton.setOnAction(e -> send());
+        // The input grows to fill the row, which otherwise squeezes the button until its
+        // label is clipped to an ellipsis.
+        sendButton.setMinWidth(Region.USE_PREF_SIZE);
 
         progress.setVisible(false);
         progress.setPrefSize(20, 20);
+        // Hidden nodes still reserve layout space; the spinner only exists while busy.
+        progress.managedProperty().bind(progress.visibleProperty());
 
         Slider heightSlider = new Slider(MIN_PROMPT_HEIGHT, MAX_PROMPT_HEIGHT, promptHeight.get());
         heightSlider.setPrefWidth(120);
