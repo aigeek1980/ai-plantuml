@@ -662,19 +662,26 @@ public class MainView extends BorderPane {
         return """
                 <!DOCTYPE html>
                 <html><head><meta charset="utf-8"><style>
-                  html, body { margin: 0; padding: 0; background: %s;
-                               cursor: grab; user-select: none; }
+                  html, body { margin: 0; padding: 0; background: %s; cursor: grab; }
+                  html, body, svg, svg * { -webkit-user-select: none; user-select: none; }
                   body.panning { cursor: grabbing; }
-                  a { cursor: pointer; }
+                  a { cursor: pointer; -webkit-user-drag: none; }
                 </style></head><body>%s<script>
                 (function () {
                   var PAN_THRESHOLD = 4;
                   var down = false, panned = false, lastX = 0, lastY = 0;
 
+                  // Dragging from an <a> otherwise starts WebKit's native link
+                  // drag-and-drop, which fights the pan for control of the gesture.
+                  document.addEventListener('dragstart', function (e) { e.preventDefault(); });
+
                   document.addEventListener('mousedown', function (e) {
                     if (e.button !== 0) return;
                     down = true; panned = false;
                     lastX = e.clientX; lastY = e.clientY;
+                    // Suppresses the browser's own drag gestures (text selection, link
+                    // dragging) without suppressing the click that follows.
+                    e.preventDefault();
                   });
 
                   document.addEventListener('mousemove', function (e) {
