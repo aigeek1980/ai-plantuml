@@ -7,7 +7,7 @@
 # recipients just unzip and run the .exe, no Java install needed on their machine.
 
 $ErrorActionPreference = "Stop"
-$version = "1.5.0"
+$version = "1.6.0"
 
 $root = Resolve-Path "$PSScriptRoot\.."
 Set-Location $root
