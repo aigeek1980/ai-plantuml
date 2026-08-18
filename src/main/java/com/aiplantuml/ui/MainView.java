@@ -31,6 +31,7 @@ import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
+import javafx.scene.input.MouseEvent;
 import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -108,6 +109,14 @@ public class MainView extends BorderPane {
         ContextMenu diagramContextMenu = new ContextMenu(contextExportMenu);
         diagramView.setOnContextMenuRequested(e ->
                 diagramContextMenu.show(diagramView, e.getScreenX(), e.getScreenY()));
+        // A popup's own auto-hide never fires for clicks landing inside the WebView,
+        // since the embedded page consumes them - so the menu would stay open while
+        // panning underneath it. An event filter sees the press before the page does.
+        diagramView.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> {
+            if (diagramContextMenu.isShowing()) {
+                diagramContextMenu.hide();
+            }
+        });
 
         chatPane = new ChatPane(appConfig, editor::getText, code -> {
             editor.replaceText(code);
@@ -360,13 +369,11 @@ public class MainView extends BorderPane {
         engine.getLoadWorker().stateProperty().addListener((obs, oldState, newState) -> {
             if (newState != Worker.State.SUCCEEDED) return;
             Document doc = engine.getDocument();
-            if (doc == null) return;
-
-            var anchors = doc.getElementsByTagName("a");
-            for (int i = 0; i < anchors.getLength(); i++) {
-                if (anchors.item(i) instanceof EventTarget target) {
-                    target.addEventListener("click", nodeClickListener, false);
-                }
+            // One delegated listener on the document rather than one per anchor: each
+            // registration bridges a Java object into the DOM, and a large diagram has
+            // hundreds of linked elements to re-register on every single render.
+            if (doc instanceof EventTarget target) {
+                target.addEventListener("click", nodeClickListener, false);
             }
         });
     }
@@ -374,11 +381,18 @@ public class MainView extends BorderPane {
     private final EventListener nodeClickListener = new EventListener() {
         @Override
         public void handleEvent(Event event) {
-            if (!(event.getCurrentTarget() instanceof org.w3c.dom.Element element)) return;
+            if (!(event.getTarget() instanceof org.w3c.dom.Node clicked)) return;
 
-            String href = element.getAttribute("xlink:href");
-            if (href == null || href.isBlank()) {
-                href = element.getAttribute("href");
+            // The click lands on whatever shape or text sits inside the link, so walk
+            // outwards to find the anchor that encloses it.
+            String href = null;
+            for (org.w3c.dom.Node n = clicked; n != null && href == null; n = n.getParentNode()) {
+                if (n instanceof org.w3c.dom.Element element && "a".equalsIgnoreCase(element.getTagName())) {
+                    href = element.getAttribute("xlink:href");
+                    if (href == null || href.isBlank()) {
+                        href = element.getAttribute("href");
+                    }
+                }
             }
             if (href == null || !href.startsWith(DiagramNodeIndexer.LINK_PREFIX)) return;
 
@@ -716,6 +730,23 @@ public class MainView extends BorderPane {
                 (function () {
                   var PAN_THRESHOLD = 4;
                   var down = false, panned = false, lastX = 0, lastY = 0;
+                  var pendingX = 0, pendingY = 0, frameQueued = false;
+
+                  // Scrolling on every mousemove repaints faster than a large diagram can
+                  // be redrawn, so events pile up and the drag stalls. Accumulate the
+                  // deltas and apply them once per frame instead.
+                  function flush() {
+                    frameQueued = false;
+                    if (pendingX || pendingY) {
+                      window.scrollBy(pendingX, pendingY);
+                      pendingX = 0; pendingY = 0;
+                    }
+                  }
+
+                  function endPan() {
+                    down = false;
+                    document.body.classList.remove('panning');
+                  }
 
                   // Dragging from an <a> otherwise starts WebKit's native link
                   // drag-and-drop, which fights the pan for control of the gesture.
@@ -732,18 +763,19 @@ public class MainView extends BorderPane {
 
                   document.addEventListener('mousemove', function (e) {
                     if (!down) return;
+                    // Releasing the button outside the view never delivers a mouseup here,
+                    // which would otherwise leave the pan stuck on until the next click.
+                    if (e.buttons === 0) { endPan(); return; }
                     var dx = e.clientX - lastX, dy = e.clientY - lastY;
                     if (!panned && Math.abs(dx) + Math.abs(dy) < PAN_THRESHOLD) return;
                     if (!panned) { panned = true; document.body.classList.add('panning'); }
-                    window.scrollBy(-dx, -dy);
+                    pendingX -= dx; pendingY -= dy;
                     lastX = e.clientX; lastY = e.clientY;
+                    if (!frameQueued) { frameQueued = true; requestAnimationFrame(flush); }
                     e.preventDefault();
                   });
 
-                  document.addEventListener('mouseup', function () {
-                    down = false;
-                    document.body.classList.remove('panning');
-                  });
+                  document.addEventListener('mouseup', endPan);
 
                   document.addEventListener('click', function (e) {
                     if (!panned) return;
