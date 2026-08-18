@@ -42,6 +42,15 @@ public class DiagramNodeIndexer {
     private static final Pattern ARROW = Pattern.compile(
             "^\\s*" + IDENT + "\\s*[<o*]?[-.]{1,2}[\\[\\]#\\w]{0,12}[-.]{0,2}[>|]{0,2}\\s*" + IDENT + "\\b");
 
+    /**
+     * CREOLE text links (message labels, mindmap labels) render blue and underlined by
+     * default, which would turn every linked call in the diagram into visible hyperlink
+     * text. Since these links exist purely to carry click targets, style them back to
+     * ordinary text.
+     */
+    private static final String LINK_STYLE_RESET =
+            "skinparam hyperlinkColor #000000\nskinparam hyperlinkUnderline false\n";
+
     private static final Pattern MINDMAP_START = Pattern.compile("(?im)^\\s*@start(mindmap|wbs)\\b");
     private static final Pattern MINDMAP_BULLET = Pattern.compile("^(\\s*)([*+_-]{1,10})(:)?\\s*(.*)$");
     private static final Pattern TRAILING_STYLE_TAG = Pattern.compile("(\\s*<<\\w+>>\\s*)+$");
@@ -60,7 +69,10 @@ public class DiagramNodeIndexer {
         }
 
         if (MINDMAP_START.matcher(original).find()) {
-            return indexMindmap(original);
+            IndexResult mindmap = indexMindmap(original);
+            String styled = mindmap.shadowSource().substring(0, startMatcher.end()) + "\n" + LINK_STYLE_RESET
+                    + mindmap.shadowSource().substring(startMatcher.end());
+            return new IndexResult(styled, mindmap.nodeLineNumbers());
         }
 
         String[] lines = original.split("\n", -1);
@@ -124,13 +136,27 @@ public class DiagramNodeIndexer {
                             if (!implicitNamesInOrder.contains(right)) implicitNamesInOrder.add(right);
                             nodeLineNumbers.putIfAbsent(right, i);
                         }
+                        // Link the message label itself, so clicking a specific call jumps to
+                        // that call's line rather than only to a participant's declaration.
+                        // Message text repeats constantly ("OK", "done"), so the click target
+                        // name is uniquified while the displayed text stays exactly as written.
+                        int colon = line.indexOf(':', arrowMatcher.end());
+                        if (colon >= 0) {
+                            String label = line.substring(colon + 1).strip();
+                            if (!label.isEmpty()) {
+                                String name = uniqueName(label, nodeLineNumbers);
+                                nodeLineNumbers.put(name, i);
+                                line = line.substring(0, colon + 1) + " [[" + LINK_PREFIX + urlEncode(name)
+                                        + " " + escapeCreole(label) + "]]";
+                            }
+                        }
                     }
                 }
             }
             outputLines.add(line);
         }
 
-        StringBuilder header = new StringBuilder();
+        StringBuilder header = new StringBuilder(LINK_STYLE_RESET);
         for (String name : implicitNamesInOrder) {
             header.append("participant \"").append(escapeQuotes(name)).append("\" as ")
                     .append(sanitizeAlias(name))
@@ -162,7 +188,6 @@ public class DiagramNodeIndexer {
         String[] lines = original.split("\n", -1);
         List<String> outputLines = new ArrayList<>();
         Map<String, Integer> nodeLineNumbers = new LinkedHashMap<>();
-        Map<String, Integer> nameCounts = new java.util.HashMap<>();
 
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
@@ -189,7 +214,7 @@ public class DiagramNodeIndexer {
                     }
 
                     if (!label.isEmpty()) {
-                        String name = disambiguate(label, nameCounts);
+                        String name = uniqueName(label, nodeLineNumbers);
                         nodeLineNumbers.put(name, i);
                         line = leadingWs + bullet + colon + " [[" + LINK_PREFIX + urlEncode(name)
                                 + " " + escapeCreole(label) + "]]" + trailingStyle;
@@ -202,9 +227,17 @@ public class DiagramNodeIndexer {
         return new IndexResult(String.join("\n", outputLines), nodeLineNumbers);
     }
 
-    private String disambiguate(String name, Map<String, Integer> nameCounts) {
-        int count = nameCounts.merge(name, 1, Integer::sum);
-        return count == 1 ? name : name + " (" + count + ")";
+    /**
+     * Click-target names double as map keys, but diagram text repeats freely - the same
+     * message ("OK") recurs, and a message can even read the same as a participant name.
+     * Suffixes a counter until the name is free; the displayed text is unaffected.
+     */
+    private String uniqueName(String base, Map<String, Integer> taken) {
+        if (!taken.containsKey(base)) return base;
+        for (int n = 2; ; n++) {
+            String candidate = base + " (" + n + ")";
+            if (!taken.containsKey(candidate)) return candidate;
+        }
     }
 
     private String escapeCreole(String s) {
