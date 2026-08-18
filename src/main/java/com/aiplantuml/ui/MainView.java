@@ -9,6 +9,7 @@ import javafx.animation.PauseTransition;
 import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleDoubleProperty;
 import javafx.concurrent.Task;
+import javafx.concurrent.Worker;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Cursor;
@@ -20,19 +21,15 @@ import javafx.scene.control.Label;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
 import javafx.scene.control.MenuItem;
-import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.SplitPane;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
-import javafx.scene.image.Image;
-import javafx.scene.image.ImageView;
 import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
-import javafx.scene.input.MouseEvent;
 import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -40,19 +37,24 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
+import javafx.scene.web.WebEngine;
+import javafx.scene.web.WebView;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 import org.fxmisc.flowless.VirtualizedScrollPane;
 import org.fxmisc.richtext.CodeArea;
 import org.fxmisc.richtext.LineNumberFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.events.Event;
+import org.w3c.dom.events.EventListener;
+import org.w3c.dom.events.EventTarget;
 
-import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -67,8 +69,7 @@ public class MainView extends BorderPane {
     private final Stage stage;
     private final PlantUmlRenderer renderer = new PlantUmlRenderer();
     private final CodeArea editor = new CodeArea(DEFAULT_SOURCE);
-    private final ImageView diagramView = new ImageView();
-    private final ScrollPane diagramScroll = new ScrollPane(diagramView);
+    private final WebView diagramView = new WebView();
     private final Label statusLabel = new Label();
     private final Label zoomLabel = new Label("100%");
     private final PauseTransition debounce = new PauseTransition(Duration.millis(1000));
@@ -82,9 +83,7 @@ public class MainView extends BorderPane {
     private AppConfig appConfig = AppConfig.load();
     private final WindowState windowState = WindowState.load();
     private double zoomFactor = 1.0;
-    private List<DiagramNodeIndexer.NodeArea> nodeAreas = List.of();
     private Map<String, Integer> nodeLineNumbers = Map.of();
-    private byte[] lastRenderedPng;
     private boolean editorCollapsed = false;
     private double editorDividerPositionBeforeCollapse = 0.3;
     private final DoubleProperty aiPromptHeight = new SimpleDoubleProperty();
@@ -100,13 +99,14 @@ public class MainView extends BorderPane {
         editor.setStyleSpans(0, PlantUmlHighlighter.computeHighlighting(DEFAULT_SOURCE));
         editor.setContextMenu(buildEditorContextMenu());
 
-        diagramScroll.setPannable(true);
-        diagramView.setPreserveRatio(true);
-        diagramScroll.addEventFilter(ScrollEvent.SCROLL, this::onDiagramScroll);
-        diagramView.setOnMouseClicked(this::onDiagramClicked);
+        diagramView.setContextMenuEnabled(false);
+        diagramView.addEventFilter(ScrollEvent.SCROLL, this::onDiagramScroll);
+        installNodeLinkHandler();
 
         Menu contextExportMenu = new Menu("Export", null, buildExportMenuItems());
-        diagramScroll.setContextMenu(new ContextMenu(contextExportMenu));
+        ContextMenu diagramContextMenu = new ContextMenu(contextExportMenu);
+        diagramView.setOnContextMenuRequested(e ->
+                diagramContextMenu.show(diagramView, e.getScreenX(), e.getScreenY()));
 
         chatPane = new ChatPane(appConfig, editor::getText, code -> {
             editor.replaceText(code);
@@ -133,7 +133,7 @@ public class MainView extends BorderPane {
         StackPane editorPane = new StackPane(editorScrollPane, buildEditorCollapseButton());
         StackPane.setAlignment(editorScrollPane, Pos.CENTER);
 
-        splitPane.getItems().addAll(editorPane, diagramScroll, aiPanel);
+        splitPane.getItems().addAll(editorPane, diagramView, aiPanel);
         splitPane.setDividerPositions(windowState.getEditorDivider(), windowState.getDiagramDivider());
         setCenter(splitPane);
 
@@ -161,9 +161,11 @@ public class MainView extends BorderPane {
 
     private void applyPaneBackgrounds() {
         BackgroundUtil.applyBackground(editor, appConfig.getEditorBackground());
-        BackgroundUtil.applyBackground(diagramScroll, appConfig.getDiagramBackground());
         chatPane.applyBackground(appConfig.getChatBackground());
         questionPane.applyBackground(appConfig.getChatBackground());
+        // The diagram pane's background lives inside the WebView's own HTML document
+        // rather than on a JavaFX Region, so it's applied by re-rendering.
+        renderNow();
     }
 
     private Region spacer() {
@@ -298,25 +300,56 @@ public class MainView extends BorderPane {
         return new MenuBar(fileMenu, diagramMenu, viewMenu, helpMenu);
     }
 
-    private void onDiagramClicked(MouseEvent event) {
-        if (event.getClickCount() != 2) return;
+    /**
+     * Hooks node clicks straight off the rendered SVG's DOM: PlantUML wraps each
+     * linked element in an {@code <a xlink:href="node://name">} around its real vector
+     * shape, so the clickable region is the element itself - no pixel coordinates, no
+     * zoom math, and nothing that can drift out of sync with what's on screen.
+     * <p>
+     * The listener is re-attached on every page load because loading new content
+     * replaces the whole document (and with it every node the old listener was on).
+     */
+    private void installNodeLinkHandler() {
+        WebEngine engine = diagramView.getEngine();
+        engine.getLoadWorker().stateProperty().addListener((obs, oldState, newState) -> {
+            if (newState != Worker.State.SUCCEEDED) return;
+            Document doc = engine.getDocument();
+            if (doc == null) return;
 
-        double nativeX = event.getX() / zoomFactor;
-        double nativeY = event.getY() / zoomFactor;
-
-        for (DiagramNodeIndexer.NodeArea area : nodeAreas) {
-            if (area.contains(nativeX, nativeY)) {
-                copyToClipboard(area.name());
-                Integer lineNumber = nodeLineNumbers.get(area.name());
-                if (lineNumber != null) {
-                    moveCaretToLine(lineNumber);
+            var anchors = doc.getElementsByTagName("a");
+            for (int i = 0; i < anchors.getLength(); i++) {
+                if (anchors.item(i) instanceof EventTarget target) {
+                    target.addEventListener("click", nodeClickListener, false);
                 }
-                statusLabel.setTextFill(Color.DARKGREEN);
-                statusLabel.setText("Copied \"" + area.name() + "\" to clipboard");
-                return;
             }
-        }
+        });
     }
+
+    private final EventListener nodeClickListener = new EventListener() {
+        @Override
+        public void handleEvent(Event event) {
+            if (!(event.getCurrentTarget() instanceof org.w3c.dom.Element element)) return;
+
+            String href = element.getAttribute("xlink:href");
+            if (href == null || href.isBlank()) {
+                href = element.getAttribute("href");
+            }
+            if (href == null || !href.startsWith(DiagramNodeIndexer.LINK_PREFIX)) return;
+
+            event.preventDefault();
+            event.stopPropagation();
+
+            String name = URLDecoder.decode(href.substring(DiagramNodeIndexer.LINK_PREFIX.length()),
+                    StandardCharsets.UTF_8);
+            copyToClipboard(name);
+            Integer lineNumber = nodeLineNumbers.get(name);
+            if (lineNumber != null) {
+                moveCaretToLine(lineNumber);
+            }
+            statusLabel.setTextFill(Color.DARKGREEN);
+            statusLabel.setText("Copied \"" + name + "\" to clipboard");
+        }
+    };
 
     private void copyToClipboard(String text) {
         ClipboardContent content = new ClipboardContent();
@@ -334,6 +367,12 @@ public class MainView extends BorderPane {
         int lineEnd = offset + lines[lineIndex].length();
         editor.requestFocus();
         editor.selectRange(offset, lineEnd);
+        // Selecting a range highlights it but leaves the viewport where it was, so a
+        // jump to an off-screen line would silently do nothing visible. Center the
+        // target line instead of merely nudging it into view, so the surrounding
+        // context is visible too.
+        editor.showParagraphAtCenter(lineIndex);
+        editor.requestFollowCaret();
     }
 
     private void onDiagramScroll(ScrollEvent event) {
@@ -364,10 +403,7 @@ public class MainView extends BorderPane {
     }
 
     private void applyZoom() {
-        Image image = diagramView.getImage();
-        if (image == null) return;
-        diagramView.setFitWidth(image.getWidth() * zoomFactor);
-        diagramView.setFitHeight(image.getHeight() * zoomFactor);
+        diagramView.setZoom(zoomFactor);
         zoomLabel.setText(Math.round(zoomFactor * 100) + "%");
     }
 
@@ -539,8 +575,9 @@ public class MainView extends BorderPane {
     }
 
     private void exportPng() {
-        if (lastRenderedPng == null) {
-            showError("Nothing to export", "Render a diagram first.");
+        PlantUmlRenderer.PngRenderResult rendered = renderer.renderPng(editor.getText());
+        if (rendered.isError()) {
+            showError("Nothing to export", "The diagram has errors: " + rendered.errorText());
             return;
         }
         FileChooser chooser = new FileChooser();
@@ -556,7 +593,7 @@ public class MainView extends BorderPane {
         File file = chooser.showSaveDialog(stage);
         if (file == null) return;
         try {
-            Files.write(file.toPath(), lastRenderedPng);
+            Files.write(file.toPath(), rendered.png());
             rememberDirectory(file);
             statusLabel.setTextFill(Color.DARKGREEN);
             statusLabel.setText("Exported to " + file.getName());
@@ -597,18 +634,79 @@ public class MainView extends BorderPane {
     }
 
     public void renderNow() {
-        PlantUmlRenderer.RenderResult result = renderer.render(editor.getText());
+        PlantUmlRenderer.SvgRenderResult result = renderer.renderSvg(editor.getText());
         if (result.isError()) {
             statusLabel.setTextFill(Color.FIREBRICK);
             statusLabel.setText("Error: " + result.errorText());
             return;
         }
-        diagramView.setImage(new Image(new ByteArrayInputStream(result.png())));
-        applyZoom();
-        lastRenderedPng = result.png();
-        nodeAreas = result.nodeAreas();
         nodeLineNumbers = result.nodeLineNumbers();
+        diagramView.getEngine().loadContent(wrapSvg(result.svg()), "text/html");
+        applyZoom();
         statusLabel.setTextFill(Color.DARKGREEN);
         statusLabel.setText("Rendered OK");
+    }
+
+    /**
+     * Wraps the raw SVG in a minimal HTML document. The margin/padding reset stops the
+     * browser's default body margin from offsetting the diagram, and cursor:pointer on
+     * linked elements makes clickable nodes discoverable on hover.
+     * <p>
+     * The script restores click-drag panning, which came free from the old ScrollPane
+     * but has no WebView equivalent - important for large diagrams where scrollbars
+     * alone are awkward. A drag past a few pixels is treated as a pan rather than a
+     * click, and the click that follows it is swallowed in the capture phase so panning
+     * over a node doesn't also navigate to it.
+     */
+    private String wrapSvg(String svg) {
+        return """
+                <!DOCTYPE html>
+                <html><head><meta charset="utf-8"><style>
+                  html, body { margin: 0; padding: 0; background: %s; cursor: grab; }
+                  html, body, svg, svg * { -webkit-user-select: none; user-select: none; }
+                  body.panning { cursor: grabbing; }
+                  a { cursor: pointer; -webkit-user-drag: none; }
+                </style></head><body>%s<script>
+                (function () {
+                  var PAN_THRESHOLD = 4;
+                  var down = false, panned = false, lastX = 0, lastY = 0;
+
+                  // Dragging from an <a> otherwise starts WebKit's native link
+                  // drag-and-drop, which fights the pan for control of the gesture.
+                  document.addEventListener('dragstart', function (e) { e.preventDefault(); });
+
+                  document.addEventListener('mousedown', function (e) {
+                    if (e.button !== 0) return;
+                    down = true; panned = false;
+                    lastX = e.clientX; lastY = e.clientY;
+                    // Suppresses the browser's own drag gestures (text selection, link
+                    // dragging) without suppressing the click that follows.
+                    e.preventDefault();
+                  });
+
+                  document.addEventListener('mousemove', function (e) {
+                    if (!down) return;
+                    var dx = e.clientX - lastX, dy = e.clientY - lastY;
+                    if (!panned && Math.abs(dx) + Math.abs(dy) < PAN_THRESHOLD) return;
+                    if (!panned) { panned = true; document.body.classList.add('panning'); }
+                    window.scrollBy(-dx, -dy);
+                    lastX = e.clientX; lastY = e.clientY;
+                    e.preventDefault();
+                  });
+
+                  document.addEventListener('mouseup', function () {
+                    down = false;
+                    document.body.classList.remove('panning');
+                  });
+
+                  document.addEventListener('click', function (e) {
+                    if (!panned) return;
+                    panned = false;
+                    e.preventDefault();
+                    e.stopPropagation();
+                  }, true);
+                })();
+                </script></body></html>
+                """.formatted(appConfig.getDiagramBackground(), svg);
     }
 }
