@@ -216,7 +216,11 @@ public class DiagramNodeIndexer {
                     if (!label.isEmpty()) {
                         String name = uniqueName(label, nodeLineNumbers);
                         nodeLineNumbers.put(name, i);
-                        line = leadingWs + bullet + colon + " [[" + LINK_PREFIX + urlEncode(name)
+                        // "**:label" takes its text straight after the colon, so a space
+                        // there becomes a leading space in the rendered node; only a bare
+                        // "** label" bullet needs one as a separator.
+                        String separator = colon.isEmpty() ? " " : "";
+                        line = leadingWs + bullet + colon + separator + "[[" + LINK_PREFIX + urlEncode(name)
                                 + " " + escapeCreole(label) + "]]" + trailingStyle;
                     }
                 }
