@@ -5,7 +5,7 @@ import net.sourceforge.plantuml.FileFormatOption;
 import net.sourceforge.plantuml.SourceStringReader;
 
 import java.io.ByteArrayOutputStream;
-import java.util.List;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 public class PlantUmlRenderer {
@@ -20,68 +20,81 @@ public class PlantUmlRenderer {
 
     private final DiagramNodeIndexer nodeIndexer = new DiagramNodeIndexer();
 
-    public record RenderResult(byte[] png, String errorText, List<DiagramNodeIndexer.NodeArea> nodeAreas,
-                                Map<String, Integer> nodeLineNumbers) {
+    public record SvgRenderResult(String svg, String errorText, Map<String, Integer> nodeLineNumbers) {
+        public boolean isError() {
+            return errorText != null;
+        }
+    }
+
+    public record PngRenderResult(byte[] png, String errorText) {
         public boolean isError() {
             return errorText != null;
         }
     }
 
     /**
-     * Renders the diagram and, when possible, also returns clickable node hit-areas.
+     * Renders the diagram to SVG for the interactive viewer. Node click-to-navigate no
+     * longer needs a separately fetched pixel image-map the way the PNG viewer did:
+     * PlantUML's SVG output wraps each linked element in a real {@code <a>} tag around
+     * its actual vector shape, so the rendered SVG *is* the hit-testable structure once
+     * it's loaded into a WebView's DOM - there's no separate coordinate data to keep in
+     * sync with a separately rendered image.
      * <p>
-     * Node areas require adding invisible [[link]] annotations to a "shadow" copy of
-     * the source (see DiagramNodeIndexer). For most diagram types this shadow copy
-     * renders pixel-identical to the original, but some diagram types (e.g. mindmap)
-     * allocate different layout space once any element becomes linked. To guarantee
-     * the returned coordinates always match the returned PNG exactly, the *shadow*
-     * render (not the original) is what gets displayed whenever it renders
-     * successfully; the plain original is only used as a fallback if the shadow
-     * source somehow fails to render (a bug in the heuristic link-injection) while
-     * the user's original source is valid.
+     * Node links still require the same heuristic [[link]] injection into a "shadow"
+     * copy of the source as before (see DiagramNodeIndexer) - that part is about mapping
+     * diagram elements back to source lines, which is independent of the output format.
+     * If the injected links break otherwise-valid syntax, falls back to the plain
+     * source rendered without clickable links.
      */
-    public RenderResult render(String plantUmlSource) {
-        Rendered original = tryRender(plantUmlSource);
-        if (original.png == null) {
-            return new RenderResult(null, original.error, List.of(), Map.of());
-        }
-
-        DiagramNodeIndexer.IndexResult indexResult;
+    public SvgRenderResult renderSvg(String plantUmlSource) {
+        DiagramNodeIndexer.IndexResult indexResult = null;
         try {
             indexResult = nodeIndexer.index(plantUmlSource);
-        } catch (Exception e) {
-            return new RenderResult(original.png, null, List.of(), Map.of());
+        } catch (Exception ignored) {
+            // heuristic indexing failed - fall through to a plain, non-interactive render
         }
 
-        Rendered shadow = tryRender(indexResult.shadowSource());
-        if (shadow.png == null) {
-            // Our link injection broke otherwise-valid syntax; show the diagram without node interactivity.
-            return new RenderResult(original.png, null, List.of(), Map.of());
+        if (indexResult != null) {
+            RenderedSvg shadow = tryRenderSvg(indexResult.shadowSource());
+            if (shadow.svg != null) {
+                return new SvgRenderResult(shadow.svg, null, indexResult.nodeLineNumbers());
+            }
         }
 
-        List<DiagramNodeIndexer.NodeArea> areas = nodeIndexer.parseCMap(shadow.cmap);
-        return new RenderResult(shadow.png, null, areas, indexResult.nodeLineNumbers());
+        RenderedSvg original = tryRenderSvg(plantUmlSource);
+        if (original.svg == null) {
+            return new SvgRenderResult(null, original.error, Map.of());
+        }
+        return new SvgRenderResult(original.svg, null, Map.of());
     }
 
-    private record Rendered(byte[] png, String cmap, String error) {
-    }
-
-    private Rendered tryRender(String source) {
-        SourceStringReader reader = new SourceStringReader(source);
+    /** Renders the plain source (no link injection needed - PNG export isn't interactive). */
+    public PngRenderResult renderPng(String plantUmlSource) {
+        SourceStringReader reader = new SourceStringReader(plantUmlSource);
         try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             var description = reader.outputImage(out, new FileFormatOption(FileFormat.PNG));
             if (description == null) {
-                return new Rendered(null, null, "PlantUML produced no output. Check the diagram syntax.");
+                return new PngRenderResult(null, "PlantUML produced no output. Check the diagram syntax.");
             }
-            String cmap;
-            try {
-                cmap = reader.getCMapData(0, new FileFormatOption(FileFormat.PNG));
-            } catch (Exception e) {
-                cmap = null;
-            }
-            return new Rendered(out.toByteArray(), cmap, null);
+            return new PngRenderResult(out.toByteArray(), null);
         } catch (Exception e) {
-            return new Rendered(null, null, e.getMessage() != null ? e.getMessage() : e.toString());
+            return new PngRenderResult(null, e.getMessage() != null ? e.getMessage() : e.toString());
+        }
+    }
+
+    private record RenderedSvg(String svg, String error) {
+    }
+
+    private RenderedSvg tryRenderSvg(String source) {
+        SourceStringReader reader = new SourceStringReader(source);
+        try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            var description = reader.outputImage(out, new FileFormatOption(FileFormat.SVG));
+            if (description == null) {
+                return new RenderedSvg(null, "PlantUML produced no output. Check the diagram syntax.");
+            }
+            return new RenderedSvg(out.toString(StandardCharsets.UTF_8), null);
+        } catch (Exception e) {
+            return new RenderedSvg(null, e.getMessage() != null ? e.getMessage() : e.toString());
         }
     }
 }

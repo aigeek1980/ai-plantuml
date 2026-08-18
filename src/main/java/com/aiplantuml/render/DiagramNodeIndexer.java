@@ -13,9 +13,10 @@ import java.util.regex.Pattern;
 
 /**
  * Builds a "shadow" copy of a PlantUML source with invisible [[node://name]] link
- * annotations added to every declared/implied element, so PlantUML's image-map
- * (cmapx) output can be used to hit-test clicks against element names.
- * The visible diagram rendered from the original source is never touched.
+ * annotations added to every declared/implied element. When rendered to SVG, each
+ * annotated element ends up wrapped in a real {@code <a xlink:href="node://name">}
+ * tag around its actual vector shape, which the SVG viewer uses directly as the
+ * clickable region - no separate coordinate/image-map data needed.
  *
  * This is a best-effort heuristic (regex-based, not a full PlantUML parser):
  * reliable for sequence diagram participants/actors and for explicitly declared
@@ -24,7 +25,7 @@ import java.util.regex.Pattern;
  */
 public class DiagramNodeIndexer {
 
-    private static final String LINK_PREFIX = "node://";
+    public static final String LINK_PREFIX = "node://";
     private static final Set<String> DECLARABLE_TYPES = Set.of(
             "participant", "actor", "boundary", "control", "entity",
             "database", "collections", "queue", "class", "interface",
@@ -45,14 +46,8 @@ public class DiagramNodeIndexer {
     private static final Pattern MINDMAP_BULLET = Pattern.compile("^(\\s*)([*+_-]{1,10})(:)?\\s*(.*)$");
     private static final Pattern TRAILING_STYLE_TAG = Pattern.compile("(\\s*<<\\w+>>\\s*)+$");
 
-    public record NodeArea(String name, double x1, double y1, double x2, double y2) {
-        public boolean contains(double x, double y) {
-            return x >= x1 && x <= x2 && y >= y1 && y <= y2;
-        }
-    }
-
     /**
-     * @param shadowSource   source with [[node://name]] links injected, for cmap extraction
+     * @param shadowSource   source with [[node://name]] links injected
      * @param nodeLineNumbers name -> 0-based line number of its declaration/first use in the original source
      */
     public record IndexResult(String shadowSource, Map<String, Integer> nodeLineNumbers) {
@@ -214,30 +209,6 @@ public class DiagramNodeIndexer {
 
     private String escapeCreole(String s) {
         return s.replace("~", "~~").replace("[", "~[").replace("]", "~]");
-    }
-
-    public List<NodeArea> parseCMap(String cmapHtml) {
-        List<NodeArea> areas = new ArrayList<>();
-        if (cmapHtml == null || cmapHtml.isBlank()) return areas;
-
-        Pattern areaTag = Pattern.compile("<area[^>]*href=\"" + Pattern.quote(LINK_PREFIX) + "([^\"]*)\"[^>]*coords=\"([^\"]*)\"[^>]*/?>");
-        Matcher m = areaTag.matcher(cmapHtml);
-        while (m.find()) {
-            String encodedName = m.group(1);
-            String[] coords = m.group(2).split(",");
-            if (coords.length != 4) continue;
-            try {
-                String name = java.net.URLDecoder.decode(encodedName, StandardCharsets.UTF_8);
-                double x1 = Double.parseDouble(coords[0].trim());
-                double y1 = Double.parseDouble(coords[1].trim());
-                double x2 = Double.parseDouble(coords[2].trim());
-                double y2 = Double.parseDouble(coords[3].trim());
-                areas.add(new NodeArea(name, x1, y1, x2, y2));
-            } catch (NumberFormatException ignored) {
-                // skip malformed area entry
-            }
-        }
-        return areas;
     }
 
     private String firstWord(String lowerTrimmedLine) {
