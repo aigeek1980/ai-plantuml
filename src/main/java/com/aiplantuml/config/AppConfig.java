@@ -21,6 +21,9 @@ public class AppConfig {
     private static final String KEY_EXPORT_TABLE_PROMPT = "export.tablePrompt";
     private static final String KEY_EXPORT_DETAILED_PROMPT = "export.detailedPrompt";
     private static final String KEY_EXPORT_SUMMARY_PROMPT = "export.summaryPrompt";
+    private static final String KEY_AI_TIMEOUT_SECONDS = "kimi.timeoutSeconds";
+
+    public static final int DEFAULT_AI_TIMEOUT_SECONDS = 60;
 
     public static final String DEFAULT_EXPORT_TABLE_PROMPT = """
             Analyze this PlantUML diagram and output a markdown table listing each \
@@ -51,6 +54,7 @@ public class AppConfig {
     private String exportTablePrompt = DEFAULT_EXPORT_TABLE_PROMPT;
     private String exportDetailedPrompt = DEFAULT_EXPORT_DETAILED_PROMPT;
     private String exportSummaryPrompt = DEFAULT_EXPORT_SUMMARY_PROMPT;
+    private int aiTimeoutSeconds = DEFAULT_AI_TIMEOUT_SECONDS;
 
     public static AppConfig load() {
         AppConfig config = new AppConfig();
@@ -67,11 +71,24 @@ public class AppConfig {
                 config.exportTablePrompt = props.getProperty(KEY_EXPORT_TABLE_PROMPT, config.exportTablePrompt);
                 config.exportDetailedPrompt = props.getProperty(KEY_EXPORT_DETAILED_PROMPT, config.exportDetailedPrompt);
                 config.exportSummaryPrompt = props.getProperty(KEY_EXPORT_SUMMARY_PROMPT, config.exportSummaryPrompt);
+                config.aiTimeoutSeconds = parseTimeout(props.getProperty(KEY_AI_TIMEOUT_SECONDS), config.aiTimeoutSeconds);
             } catch (IOException e) {
                 throw new RuntimeException("Failed to read config file: " + CONFIG_FILE, e);
             }
         }
         return config;
+    }
+
+    private static int parseTimeout(String raw, int fallback) {
+        if (raw == null || raw.isBlank()) {
+            return fallback;
+        }
+        try {
+            int value = Integer.parseInt(raw.trim());
+            return value > 0 ? value : fallback;
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
     }
 
     public void save() {
@@ -85,6 +102,7 @@ public class AppConfig {
         props.setProperty(KEY_EXPORT_TABLE_PROMPT, exportTablePrompt);
         props.setProperty(KEY_EXPORT_DETAILED_PROMPT, exportDetailedPrompt);
         props.setProperty(KEY_EXPORT_SUMMARY_PROMPT, exportSummaryPrompt);
+        props.setProperty(KEY_AI_TIMEOUT_SECONDS, String.valueOf(aiTimeoutSeconds));
         try {
             Files.createDirectories(CONFIG_DIR);
             try (OutputStream out = Files.newOutputStream(CONFIG_FILE)) {
@@ -165,5 +183,13 @@ public class AppConfig {
 
     public void setExportSummaryPrompt(String exportSummaryPrompt) {
         this.exportSummaryPrompt = exportSummaryPrompt;
+    }
+
+    public int getAiTimeoutSeconds() {
+        return aiTimeoutSeconds;
+    }
+
+    public void setAiTimeoutSeconds(int aiTimeoutSeconds) {
+        this.aiTimeoutSeconds = aiTimeoutSeconds;
     }
 }

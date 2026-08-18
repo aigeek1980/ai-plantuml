@@ -19,6 +19,7 @@ public class WindowState {
     private boolean maximized = false;
     private double editorDivider = 0.4;
     private double diagramDivider = 0.75;
+    private double aiPromptHeight = 70;
     private String lastDirectory;
 
     public static WindowState load() {
@@ -34,6 +35,7 @@ public class WindowState {
                 state.maximized = Boolean.parseBoolean(props.getProperty("maximized", "false"));
                 state.editorDivider = parseDouble(props.getProperty("editorDivider"), state.editorDivider);
                 state.diagramDivider = parseDouble(props.getProperty("diagramDivider"), state.diagramDivider);
+                state.aiPromptHeight = parseDouble(props.getProperty("aiPromptHeight"), state.aiPromptHeight);
                 state.lastDirectory = props.getProperty("lastDirectory");
             } catch (IOException e) {
                 throw new RuntimeException("Failed to read window state file: " + STATE_FILE, e);
@@ -51,6 +53,7 @@ public class WindowState {
         props.setProperty("maximized", String.valueOf(maximized));
         props.setProperty("editorDivider", String.valueOf(editorDivider));
         props.setProperty("diagramDivider", String.valueOf(diagramDivider));
+        props.setProperty("aiPromptHeight", String.valueOf(aiPromptHeight));
         if (lastDirectory != null) props.setProperty("lastDirectory", lastDirectory);
         try {
             Files.createDirectories(CONFIG_DIR);
@@ -124,6 +127,14 @@ public class WindowState {
 
     public void setDiagramDivider(double diagramDivider) {
         this.diagramDivider = diagramDivider;
+    }
+
+    public double getAiPromptHeight() {
+        return aiPromptHeight;
+    }
+
+    public void setAiPromptHeight(double aiPromptHeight) {
+        this.aiPromptHeight = aiPromptHeight;
     }
 
     public String getLastDirectory() {

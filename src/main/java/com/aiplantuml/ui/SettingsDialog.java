@@ -31,6 +31,10 @@ public class SettingsDialog extends Dialog<Boolean> {
 
         TextField baseUrlField = new TextField(config.getBaseUrl());
         TextField modelField = new TextField(config.getModel());
+        TextField timeoutField = new TextField(String.valueOf(config.getAiTimeoutSeconds()));
+        timeoutField.setPrefWidth(80);
+        timeoutField.setTextFormatter(new javafx.scene.control.TextFormatter<String>(change ->
+                change.getControlNewText().matches("\\d{0,4}") ? change : null));
 
         ColorPicker editorColorPicker = new ColorPicker(Color.web(config.getEditorBackground()));
         ColorPicker diagramColorPicker = new ColorPicker(Color.web(config.getDiagramBackground()));
@@ -43,6 +47,7 @@ public class SettingsDialog extends Dialog<Boolean> {
         grid.addRow(row++, new Label("API Key:"), apiKeyField);
         grid.addRow(row++, new Label("Base URL:"), baseUrlField);
         grid.addRow(row++, new Label("Model:"), modelField);
+        grid.addRow(row++, new Label("AI request timeout (seconds):"), timeoutField);
         grid.add(new Separator(), 0, row++, 2, 1);
         grid.add(new Label("Pane background colors"), 0, row++, 2, 1);
         grid.addRow(row++, new Label("Editor:"), editorColorPicker);
@@ -78,6 +83,7 @@ public class SettingsDialog extends Dialog<Boolean> {
                 config.setApiKey(apiKeyField.getText());
                 config.setBaseUrl(baseUrlField.getText());
                 config.setModel(modelField.getText());
+                config.setAiTimeoutSeconds(parseTimeoutOrDefault(timeoutField.getText()));
                 config.setEditorBackground(toHex(editorColorPicker.getValue()));
                 config.setDiagramBackground(toHex(diagramColorPicker.getValue()));
                 config.setChatBackground(toHex(chatColorPicker.getValue()));
@@ -89,6 +95,15 @@ public class SettingsDialog extends Dialog<Boolean> {
             }
             return false;
         });
+    }
+
+    private static int parseTimeoutOrDefault(String text) {
+        try {
+            int value = Integer.parseInt(text.trim());
+            return value > 0 ? value : AppConfig.DEFAULT_AI_TIMEOUT_SECONDS;
+        } catch (NumberFormatException e) {
+            return AppConfig.DEFAULT_AI_TIMEOUT_SECONDS;
+        }
     }
 
     private TextArea promptArea(String text) {

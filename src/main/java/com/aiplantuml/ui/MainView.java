@@ -6,10 +6,14 @@ import com.aiplantuml.config.WindowState;
 import com.aiplantuml.render.DiagramNodeIndexer;
 import com.aiplantuml.render.PlantUmlRenderer;
 import javafx.animation.PauseTransition;
+import javafx.beans.property.DoubleProperty;
+import javafx.beans.property.SimpleDoubleProperty;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.Cursor;
 import javafx.scene.control.Alert;
+import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
@@ -34,6 +38,7 @@ import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
@@ -66,7 +71,7 @@ public class MainView extends BorderPane {
     private final ScrollPane diagramScroll = new ScrollPane(diagramView);
     private final Label statusLabel = new Label();
     private final Label zoomLabel = new Label("100%");
-    private final PauseTransition debounce = new PauseTransition(Duration.millis(400));
+    private final PauseTransition debounce = new PauseTransition(Duration.millis(1000));
     private final SplitPane splitPane = new SplitPane();
     private final VirtualizedScrollPane<CodeArea> editorScrollPane = new VirtualizedScrollPane<>(editor);
     private ChatPane chatPane;
@@ -80,15 +85,20 @@ public class MainView extends BorderPane {
     private List<DiagramNodeIndexer.NodeArea> nodeAreas = List.of();
     private Map<String, Integer> nodeLineNumbers = Map.of();
     private byte[] lastRenderedPng;
+    private boolean editorCollapsed = false;
+    private double editorDividerPositionBeforeCollapse = 0.3;
+    private final DoubleProperty aiPromptHeight = new SimpleDoubleProperty();
 
     public MainView(Stage stage) {
         this.stage = stage;
         applyWindowState();
+        aiPromptHeight.set(windowState.getAiPromptHeight());
         getStylesheets().add(getClass().getResource("/app-theme.css").toExternalForm());
 
         editor.setParagraphGraphicFactory(LineNumberFactory.get(editor));
         editor.getStylesheets().add(getClass().getResource("/plantuml-highlighting.css").toExternalForm());
         editor.setStyleSpans(0, PlantUmlHighlighter.computeHighlighting(DEFAULT_SOURCE));
+        editor.setContextMenu(buildEditorContextMenu());
 
         diagramScroll.setPannable(true);
         diagramView.setPreserveRatio(true);
@@ -101,8 +111,8 @@ public class MainView extends BorderPane {
         chatPane = new ChatPane(appConfig, editor::getText, code -> {
             editor.replaceText(code);
             renderNow();
-        });
-        questionPane = new QuestionPane(appConfig, editor::getText);
+        }, aiPromptHeight);
+        questionPane = new QuestionPane(appConfig, editor::getText, aiPromptHeight);
 
         TabPane aiTabPane = new TabPane();
         Tab editTab = new Tab("Edit Diagram", chatPane);
@@ -120,7 +130,10 @@ public class MainView extends BorderPane {
         aiPanel.setTop(aiCaption);
         aiPanel.setCenter(aiTabPane);
 
-        splitPane.getItems().addAll(editorScrollPane, diagramScroll, aiPanel);
+        StackPane editorPane = new StackPane(editorScrollPane, buildEditorCollapseButton());
+        StackPane.setAlignment(editorScrollPane, Pos.CENTER);
+
+        splitPane.getItems().addAll(editorPane, diagramScroll, aiPanel);
         splitPane.setDividerPositions(windowState.getEditorDivider(), windowState.getDiagramDivider());
         setCenter(splitPane);
 
@@ -159,6 +172,59 @@ public class MainView extends BorderPane {
         return region;
     }
 
+    private ContextMenu buildEditorContextMenu() {
+        MenuItem cutItem = new MenuItem("Cut");
+        cutItem.setOnAction(e -> editor.cut());
+
+        MenuItem copyItem = new MenuItem("Copy");
+        copyItem.setOnAction(e -> editor.copy());
+
+        MenuItem pasteItem = new MenuItem("Paste");
+        pasteItem.setOnAction(e -> editor.paste());
+
+        MenuItem selectAllItem = new MenuItem("Select All");
+        selectAllItem.setOnAction(e -> editor.selectAll());
+
+        ContextMenu menu = new ContextMenu(cutItem, copyItem, new SeparatorMenuItem(), pasteItem,
+                new SeparatorMenuItem(), selectAllItem);
+        menu.setOnShowing(e -> {
+            boolean hasSelection = !editor.getSelectedText().isEmpty();
+            cutItem.setDisable(!hasSelection);
+            copyItem.setDisable(!hasSelection);
+            pasteItem.setDisable(!Clipboard.getSystemClipboard().hasString());
+        });
+        return menu;
+    }
+
+    /**
+     * A small "collapse the editor pane" toggle, overlaid on the right edge of the
+     * editor pane itself (right where it meets the divider) rather than injected into
+     * the SplitPane divider's own internal skin node - that node isn't guaranteed to
+     * exist/keep a stable size across skin implementations, so a button added to it
+     * could silently render with zero visible area.
+     */
+    private Button buildEditorCollapseButton() {
+        Button collapseButton = new Button("‹");
+        collapseButton.getStyleClass().add("split-collapse-button");
+        collapseButton.setFocusTraversable(false);
+        collapseButton.setOnAction(e -> toggleEditorCollapse(collapseButton));
+        StackPane.setAlignment(collapseButton, Pos.CENTER_RIGHT);
+        return collapseButton;
+    }
+
+    private void toggleEditorCollapse(Button collapseButton) {
+        SplitPane.Divider divider = splitPane.getDividers().get(0);
+        if (editorCollapsed) {
+            divider.setPosition(editorDividerPositionBeforeCollapse);
+            collapseButton.setText("‹");
+        } else {
+            editorDividerPositionBeforeCollapse = divider.getPosition();
+            divider.setPosition(0.0);
+            collapseButton.setText("›");
+        }
+        editorCollapsed = !editorCollapsed;
+    }
+
     private void applyWindowState() {
         if (windowState.getX() != null) stage.setX(windowState.getX());
         if (windowState.getY() != null) stage.setY(windowState.getY());
@@ -180,6 +246,7 @@ public class MainView extends BorderPane {
             windowState.setEditorDivider(dividers[0]);
             windowState.setDiagramDivider(dividers[1]);
         }
+        windowState.setAiPromptHeight(aiPromptHeight.get());
         windowState.save();
     }
 

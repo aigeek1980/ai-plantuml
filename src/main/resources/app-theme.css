@@ -35,3 +35,25 @@
     -fx-border-color: #D8DCE1;
     -fx-border-width: 1;
 }
+
+/* Small toggle overlaid on the editor/diagram split divider to collapse/restore
+   the editor pane. Deliberately wider than the thin divider strip itself so it's
+   easy to grab; it overhangs the adjoining panes slightly by design. */
+.split-collapse-button {
+    -fx-min-width: 16px;
+    -fx-max-width: 16px;
+    -fx-min-height: 28px;
+    -fx-max-height: 28px;
+    -fx-padding: 0;
+    -fx-background-color: #F2F3F5;
+    -fx-border-color: #D8DCE1;
+    -fx-border-radius: 4px;
+    -fx-background-radius: 4px;
+    -fx-font-size: 11px;
+    -fx-text-fill: #55585C;
+    -fx-cursor: hand;
+}
+
+.split-collapse-button:hover {
+    -fx-background-color: #E3E6EA;
+}

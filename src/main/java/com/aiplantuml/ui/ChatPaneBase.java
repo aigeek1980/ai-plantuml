@@ -1,12 +1,19 @@
 package com.aiplantuml.ui;
 
+import javafx.beans.property.DoubleProperty;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.control.Button;
+import javafx.scene.control.Label;
 import javafx.scene.control.ProgressIndicator;
-import javafx.scene.control.TextField;
+import javafx.scene.control.Slider;
+import javafx.scene.control.TextArea;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
+import javafx.scene.layout.VBox;
 import org.fxmisc.flowless.VirtualizedScrollPane;
 import org.fxmisc.richtext.InlineCssTextArea;
 
@@ -15,9 +22,9 @@ import java.util.regex.Pattern;
 
 /**
  * Shared scaffolding for a simple chat-style panel: a scrolling, selectable/copyable
- * history of sender-labeled messages, a single-line input, a send button, and a busy
- * indicator. Subclasses implement {@link #onSend(String)} to decide what happens with
- * the submitted text.
+ * history of sender-labeled messages, a multi-line input (Enter to send, Shift+Enter
+ * for a newline) with a height slider, a send button, and a busy indicator. Subclasses
+ * implement {@link #onSend(String)} to decide what happens with the submitted text.
  * <p>
  * The history is an InlineCssTextArea (read-only) rather than plain Text/TextFlow
  * nodes, since RichTextFX's styled text areas support both per-range inline styling
@@ -33,12 +40,21 @@ public abstract class ChatPaneBase extends BorderPane {
     private static final String ERROR_COLOR = "#C0392B";
     private static final String SYSTEM_COLOR = "#6B7280";
 
+    private static final double MIN_PROMPT_HEIGHT = 50;
+    private static final double MAX_PROMPT_HEIGHT = 300;
+
     private final InlineCssTextArea history = new InlineCssTextArea();
-    private final TextField input = new TextField();
+    private final TextArea input = new TextArea();
     private final Button sendButton;
     private final ProgressIndicator progress = new ProgressIndicator();
 
-    protected ChatPaneBase(String buttonLabel, String promptText, String greeting) {
+    /**
+     * @param promptHeight shared, persisted input height - bound bidirectionally to
+     *                      this pane's slider and its input's height, so dragging the
+     *                      slider in either AI tab keeps both in sync and survives restarts
+     *                      (the caller is responsible for loading/saving its value).
+     */
+    protected ChatPaneBase(String buttonLabel, String promptText, String greeting, DoubleProperty promptHeight) {
         history.setEditable(false);
         history.setWrapText(true);
         history.setStyle("-fx-font-family: 'Segoe UI', sans-serif; -fx-font-size: 13px;");
@@ -46,7 +62,14 @@ public abstract class ChatPaneBase extends BorderPane {
         setCenter(historyScroll);
 
         input.setPromptText(promptText);
-        input.setOnAction(e -> send());
+        input.setWrapText(true);
+        input.prefHeightProperty().bind(promptHeight);
+        input.addEventFilter(KeyEvent.KEY_PRESSED, e -> {
+            if (e.getCode() == KeyCode.ENTER && !e.isShiftDown()) {
+                e.consume();
+                send();
+            }
+        });
 
         sendButton = new Button(buttonLabel);
         sendButton.setOnAction(e -> send());
@@ -54,10 +77,20 @@ public abstract class ChatPaneBase extends BorderPane {
         progress.setVisible(false);
         progress.setPrefSize(20, 20);
 
+        Slider heightSlider = new Slider(MIN_PROMPT_HEIGHT, MAX_PROMPT_HEIGHT, promptHeight.get());
+        heightSlider.setPrefWidth(120);
+        heightSlider.valueProperty().bindBidirectional(promptHeight);
+
+        HBox sliderRow = new HBox(6, new Label("Prompt height:"), heightSlider);
+        sliderRow.setAlignment(Pos.CENTER_LEFT);
+        sliderRow.setPadding(new Insets(4, 6, 0, 6));
+
         HBox inputRow = new HBox(6, input, sendButton, progress);
-        inputRow.setPadding(new Insets(6));
+        inputRow.setAlignment(Pos.BOTTOM_LEFT);
+        inputRow.setPadding(new Insets(4, 6, 6, 6));
         HBox.setHgrow(input, Priority.ALWAYS);
-        setBottom(inputRow);
+
+        setBottom(new VBox(sliderRow, inputRow));
 
         appendSystemMessage(greeting);
     }
