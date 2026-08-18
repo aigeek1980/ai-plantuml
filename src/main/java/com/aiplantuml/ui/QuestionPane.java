@@ -2,6 +2,7 @@ package com.aiplantuml.ui;
 
 import com.aiplantuml.ai.KimiClient;
 import com.aiplantuml.config.AppConfig;
+import javafx.beans.property.DoubleProperty;
 import javafx.concurrent.Task;
 
 import java.util.function.Supplier;
@@ -15,9 +16,10 @@ public class QuestionPane extends ChatPaneBase {
     private final KimiClient kimiClient;
     private final Supplier<String> currentCodeSupplier;
 
-    public QuestionPane(AppConfig config, Supplier<String> currentCodeSupplier) {
+    public QuestionPane(AppConfig config, Supplier<String> currentCodeSupplier, DoubleProperty promptHeight) {
         super("Ask", "Ask about the diagram, e.g. \"what happens after the payment call?\"",
-                "Ask questions about the current diagram. This won't change your diagram.");
+                "Ask questions about the current diagram. This won't change your diagram.",
+                promptHeight);
         this.kimiClient = new KimiClient(config);
         this.currentCodeSupplier = currentCodeSupplier;
     }

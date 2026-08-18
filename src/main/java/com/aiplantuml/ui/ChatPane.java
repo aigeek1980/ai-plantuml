@@ -2,6 +2,7 @@ package com.aiplantuml.ui;
 
 import com.aiplantuml.ai.KimiClient;
 import com.aiplantuml.config.AppConfig;
+import javafx.beans.property.DoubleProperty;
 import javafx.concurrent.Task;
 
 import java.util.function.Consumer;
@@ -17,9 +18,11 @@ public class ChatPane extends ChatPaneBase {
     private final Supplier<String> currentCodeSupplier;
     private final Consumer<String> onCodeUpdated;
 
-    public ChatPane(AppConfig config, Supplier<String> currentCodeSupplier, Consumer<String> onCodeUpdated) {
+    public ChatPane(AppConfig config, Supplier<String> currentCodeSupplier, Consumer<String> onCodeUpdated,
+                     DoubleProperty promptHeight) {
         super("Send", "Describe a change, e.g. \"add a third participant Carol\"",
-                "Ask the AI to create or modify the diagram. Its replies replace the editor content (use Ctrl+Z to undo).");
+                "Ask the AI to create or modify the diagram. Its replies replace the editor content (use Ctrl+Z to undo).",
+                promptHeight);
         this.kimiClient = new KimiClient(config);
         this.currentCodeSupplier = currentCodeSupplier;
         this.onCodeUpdated = onCodeUpdated;
