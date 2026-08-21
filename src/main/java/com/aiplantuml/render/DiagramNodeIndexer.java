@@ -34,6 +34,14 @@ public class DiagramNodeIndexer {
             "note", "hnote", "rnote", "alt", "else", "opt", "loop", "par",
             "break", "critical", "group", "end", "activate", "deactivate",
             "autonumber", "title", "skinparam", "return", "box", "newpage");
+    private static final Set<String> NOTE_KEYWORDS = Set.of("note", "hnote", "rnote");
+    /**
+     * A multi-line note names where it goes ("note over Alice", "note left of Bob").
+     * Requiring one of these keeps a {@code <style>} block's "note {" rule - which is a
+     * styling declaration, not a note - from being mistaken for the start of a note body.
+     */
+    private static final Set<String> NOTE_POSITIONS = Set.of(
+            "left", "right", "over", "top", "bottom", "across");
 
     private static final Pattern STARTUML = Pattern.compile("(?m)^\\s*@start\\w*.*$");
     private static final String IDENT = "(\"(?:[^\"\\\\]|\\\\.)*\"|[\\w.]+)";
@@ -81,6 +89,7 @@ public class DiagramNodeIndexer {
         List<String> outputLines = new ArrayList<>();
         Map<String, Integer> nodeLineNumbers = new LinkedHashMap<>();
         boolean insideNote = false;
+        boolean insideStyle = false;
 
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
@@ -89,7 +98,18 @@ public class DiagramNodeIndexer {
             String firstWord = firstWord(lower);
             boolean skip;
 
-            if (insideNote) {
+            if (insideStyle) {
+                // A <style> block is CSS-like styling, not diagram syntax, yet its rules
+                // are named after the very things declarations are ("participant {",
+                // "queue {", "arrow {") - so it has to be skipped wholesale.
+                skip = true;
+                if (lower.contains("</style>")) {
+                    insideStyle = false;
+                }
+            } else if (lower.startsWith("<style")) {
+                skip = true;
+                insideStyle = !lower.contains("</style>");
+            } else if (insideNote) {
                 // Free-text note body - never a declaration/arrow, no matter what it
                 // contains (identifiers, punctuation, anything). Only "end note" (etc.)
                 // exits the block; it's already covered by SKIP_LINE_PREFIXES's "end".
@@ -104,8 +124,7 @@ public class DiagramNodeIndexer {
                 // A bare "note right"/"note left of Alice"/etc. (no ":" inline text)
                 // opens a multi-line block whose body lines don't start with "note" and
                 // would otherwise be scanned as if they were diagram syntax.
-                if (skip && (firstWord.equals("note") || firstWord.equals("hnote") || firstWord.equals("rnote"))
-                        && !trimmed.contains(":")) {
+                if (skip && NOTE_KEYWORDS.contains(firstWord) && opensMultiLineNote(lower)) {
                     insideNote = true;
                 }
             }
@@ -246,6 +265,16 @@ public class DiagramNodeIndexer {
 
     private String escapeCreole(String s) {
         return s.replace("~", "~~").replace("[", "~[").replace("]", "~]");
+    }
+
+    /**
+     * True for a note that opens a body running until "end note", rather than a
+     * one-liner ("note left: text") or a style rule that merely starts with the word.
+     */
+    private boolean opensMultiLineNote(String lowerTrimmedLine) {
+        if (lowerTrimmedLine.contains(":")) return false;
+        String rest = lowerTrimmedLine.substring(firstWord(lowerTrimmedLine).length()).strip();
+        return NOTE_POSITIONS.contains(firstWord(rest));
     }
 
     private String firstWord(String lowerTrimmedLine) {
