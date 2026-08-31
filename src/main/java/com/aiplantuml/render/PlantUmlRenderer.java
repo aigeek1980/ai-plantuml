@@ -1,8 +1,10 @@
 package com.aiplantuml.render;
 
+import net.sourceforge.plantuml.BlockUml;
 import net.sourceforge.plantuml.FileFormat;
 import net.sourceforge.plantuml.FileFormatOption;
 import net.sourceforge.plantuml.SourceStringReader;
+import net.sourceforge.plantuml.error.PSystemError;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
@@ -56,11 +58,15 @@ public class PlantUmlRenderer {
 
         if (indexResult != null) {
             RenderedSvg shadow = tryRenderSvg(indexResult.shadowSource());
-            if (shadow.svg != null) {
+            if (shadow.svg != null && !shadow.syntaxError) {
                 return new SvgRenderResult(shadow.svg, null, indexResult.nodeLineNumbers());
             }
         }
 
+        // Reached when link injection broke otherwise-valid syntax, or when the diagram
+        // is genuinely invalid. Either way the user's own source is what gets shown -
+        // including PlantUML's error picture, which points at the offending line far
+        // more usefully than a status message could.
         RenderedSvg original = tryRenderSvg(plantUmlSource);
         if (original.svg == null) {
             return new SvgRenderResult(null, original.error, Map.of());
@@ -82,7 +88,7 @@ public class PlantUmlRenderer {
         }
     }
 
-    private record RenderedSvg(String svg, String error) {
+    private record RenderedSvg(String svg, boolean syntaxError, String error) {
     }
 
     private RenderedSvg tryRenderSvg(String source) {
@@ -90,11 +96,30 @@ public class PlantUmlRenderer {
         try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             var description = reader.outputImage(out, new FileFormatOption(FileFormat.SVG));
             if (description == null) {
-                return new RenderedSvg(null, "PlantUML produced no output. Check the diagram syntax.");
+                return new RenderedSvg(null, false, "PlantUML produced no output. Check the diagram syntax.");
             }
-            return new RenderedSvg(out.toString(StandardCharsets.UTF_8), null);
+            return new RenderedSvg(out.toString(StandardCharsets.UTF_8), isSyntaxError(reader), null);
         } catch (Exception e) {
-            return new RenderedSvg(null, e.getMessage() != null ? e.getMessage() : e.toString());
+            return new RenderedSvg(null, false, e.getMessage() != null ? e.getMessage() : e.toString());
         }
+    }
+
+    /**
+     * PlantUML reports a syntax error by rendering a picture of it rather than by
+     * failing, so a successful-looking render says nothing about whether the source
+     * actually parsed. Without this, a shadow source broken by link injection would be
+     * displayed as-is and the fallback to the user's own source would never happen.
+     */
+    private boolean isSyntaxError(SourceStringReader reader) {
+        try {
+            for (BlockUml block : reader.getBlocks()) {
+                if (block.getDiagram() instanceof PSystemError) {
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            // Can't tell - treat as valid rather than discarding a usable render.
+        }
+        return false;
     }
 }
