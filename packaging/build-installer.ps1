@@ -12,6 +12,12 @@ $version = "1.7.5"
 $root = Resolve-Path "$PSScriptRoot\.."
 Set-Location $root
 
+# Dependencies are staged here by copy-dependencies, which only ever adds. Left alone,
+# a jar whose version changed since the last build ships next to the one it replaced and
+# both land on the classpath, leaving it to load order which version actually runs.
+$staging = "$root\target\jpackage-input"
+if (Test-Path $staging) { Remove-Item $staging -Recurse -Force }
+
 Write-Host "Building application jar and collecting dependencies..."
 & "$root\mvnw.cmd" package -DskipTests
 if ($LASTEXITCODE -ne 0) { throw "Maven build failed" }
