@@ -30,6 +30,9 @@ public class DiagramNodeIndexer {
             "participant", "actor", "boundary", "control", "entity",
             "database", "collections", "queue", "class", "interface",
             "object", "enum", "usecase");
+    /** Declaration keywords that mark the diagram as something other than a sequence. */
+    private static final Set<String> CLASS_STYLE_TYPES = Set.of(
+            "class", "interface", "object", "enum", "usecase");
     private static final Set<String> SKIP_LINE_PREFIXES = Set.of(
             "note", "hnote", "rnote", "alt", "else", "opt", "loop", "par",
             "break", "critical", "group", "end", "activate", "deactivate",
@@ -45,8 +48,15 @@ public class DiagramNodeIndexer {
 
     private static final Pattern STARTUML = Pattern.compile("(?m)^\\s*@start\\w*.*$");
     private static final String IDENT = "(\"(?:[^\"\\\\]|\\\\.)*\"|[\\w.]+)";
+    /**
+     * Matches through the optional {@code <<stereotype>>} as well, because a declaration
+     * accepts its link only at one position: after the name, alias and stereotype, but
+     * before any {@code #colour}. Ending the match at the stereotype puts the insertion
+     * point exactly there.
+     */
     private static final Pattern DECLARATION = Pattern.compile(
-            "^(\\s*)(" + String.join("|", DECLARABLE_TYPES) + ")\\s+" + IDENT + "(\\s+as\\s+([\\w.]+))?");
+            "^(\\s*)(" + String.join("|", DECLARABLE_TYPES) + ")\\s+" + IDENT
+                    + "(\\s+as\\s+([\\w.]+))?(\\s*<<[^<>]*>>)?");
     private static final Pattern ARROW = Pattern.compile(
             "^\\s*" + IDENT + "\\s*[<o*]?[-.]{1,2}[\\[\\]#\\w]{0,12}[-.]{0,2}[>|]{0,2}\\s*" + IDENT + "\\b");
 
@@ -90,6 +100,8 @@ public class DiagramNodeIndexer {
         Map<String, Integer> nodeLineNumbers = new LinkedHashMap<>();
         boolean insideNote = false;
         boolean insideStyle = false;
+        boolean insideBody = false;
+        boolean classStyleDiagram = false;
 
         for (int i = 0; i < lines.length; i++) {
             String line = lines[i];
@@ -98,7 +110,15 @@ public class DiagramNodeIndexer {
             String firstWord = firstWord(lower);
             boolean skip;
 
-            if (insideStyle) {
+            if (insideBody) {
+                // Members inside a "class Foo { ... }" body are field/method text, not
+                // diagram syntax. Left unskipped, ordinary prose parses as an arrow -
+                // "Post-transition Action" reads as Post -> Action - and invents nodes.
+                skip = true;
+                if (trimmed.contains("}")) {
+                    insideBody = false;
+                }
+            } else if (insideStyle) {
                 // A <style> block is CSS-like styling, not diagram syntax, yet its rules
                 // are named after the very things declarations are ("participant {",
                 // "queue {", "arrow {") - so it has to be skipped wholesale.
@@ -135,11 +155,15 @@ public class DiagramNodeIndexer {
                     String alias = declMatcher.group(4) != null ? declMatcher.group(4).replaceFirst("(?i)^\\s*as\\s+", "") : null;
                     String rawName = stripQuotes(declMatcher.group(3));
                     String copyName = alias != null ? stripQuotes(alias) : rawName;
+                    if (CLASS_STYLE_TYPES.contains(declMatcher.group(2).toLowerCase())) {
+                        classStyleDiagram = true;
+                    }
                     declaredNames.add(copyName);
                     nodeLineNumbers.putIfAbsent(copyName, i);
-                    // Link must be inserted right after the declaration (before any trailing
-                    // "#color"/stereotype) - PlantUML rejects "participant X #color [[link]]"
-                    // but accepts "participant X [[link]] #color".
+                    // A declaration takes its link in exactly one place: after the name,
+                    // alias and stereotype, and before any "#colour". Both neighbours are
+                    // rejected - "X #colour [[link]]" and "X [[link]] <<stereo>>" alike -
+                    // and the match above already ends at that one valid point.
                     int insertPos = declMatcher.end();
                     line = line.substring(0, insertPos) + " [[" + LINK_PREFIX + urlEncode(copyName) + "]]" + line.substring(insertPos);
                 } else {
@@ -173,10 +197,19 @@ public class DiagramNodeIndexer {
                 }
             }
             outputLines.add(line);
+            // A declaration body opens on the line that declares it, so this is checked
+            // after that line has had its own link injected.
+            if (!skip && !insideStyle && trimmed.endsWith("{")) {
+                insideBody = true;
+            }
         }
 
         StringBuilder header = new StringBuilder(LINK_STYLE_RESET);
-        for (String name : implicitNamesInOrder) {
+        // "participant" is sequence-diagram syntax; emitting it into a class diagram is a
+        // syntax error. Undeclared endpoints there are also far rarer, since classes are
+        // normally declared before being wired up.
+        List<String> headerNames = classStyleDiagram ? List.of() : implicitNamesInOrder;
+        for (String name : headerNames) {
             header.append("participant \"").append(escapeQuotes(name)).append("\" as ")
                     .append(sanitizeAlias(name))
                     .append(" [[").append(LINK_PREFIX).append(urlEncode(name)).append("]]\n");
