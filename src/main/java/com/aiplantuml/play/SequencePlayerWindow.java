@@ -32,6 +32,7 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -198,7 +199,7 @@ public class SequencePlayerWindow {
         timeline.play();
     }
 
-    /** Rewinds to the previously executed step, leaving branch decisions in place. */
+    /** Rewinds to the previously executed step, giving up any branch it steps back out of. */
     private void stepBack() {
         List<Integer> played = new ArrayList<>(executed);
         if (played.isEmpty()) return;
@@ -206,7 +207,24 @@ public class SequencePlayerWindow {
         executed.clear();
         executed.addAll(played);
         current = played.isEmpty() ? -1 : played.get(played.size() - 1);
+        forgetUnenteredDecisions();
         renderCurrent();
+    }
+
+    /**
+     * A branch choice only stands while some step inside that block has actually run.
+     * Rewinding past the point where an alt was entered therefore un-asks the question,
+     * so going forward again offers it afresh - and a choice made inside a nested alt is
+     * given up without disturbing the enclosing one, which is still being run through.
+     */
+    private void forgetUnenteredDecisions() {
+        Set<Integer> stillEntered = new HashSet<>();
+        for (int step : executed) {
+            for (BlockModel.Choice choice : pathOf(step)) {
+                stillEntered.add(choice.blockId());
+            }
+        }
+        decisions.keySet().retainAll(stillEntered);
     }
 
     private void pause() {
