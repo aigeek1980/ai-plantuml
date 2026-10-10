@@ -93,6 +93,17 @@ public class SequencePlayerWindow {
     private final Timeline timeline = new Timeline();
     private final BlockModel blocks;
 
+    /** Draws only what runs, rebuilding the diagram each step, instead of revealing it. */
+    private final CheckBox buildUpMode = new CheckBox("Build up only what runs");
+    private final ScriptModel script;
+    private final String background;
+    private TraceRun trace;
+    /** Answers given so far, replayed verbatim when rewinding so nothing is asked twice. */
+    private final List<Integer> answers = new ArrayList<>();
+    private int answerCursor = 0;
+    private int traceSteps = 0;
+    private Runnable afterLoad = () -> { };
+
     /** Steps actually run, which excludes the branches not chosen. */
     private final Set<Integer> executed = new LinkedHashSet<>();
     /** Branch picked for each alt, remembered for the rest of the run. */
@@ -113,6 +124,8 @@ public class SequencePlayerWindow {
     public SequencePlayerWindow(Stage owner, String source, String background, IntConsumer onStepLine) {
         this.onStepLine = onStepLine;
         this.blocks = BlockModel.parse(source);
+        this.script = ScriptModel.parse(source);
+        this.background = background;
 
         PlantUmlRenderer.SvgRenderResult result = new PlantUmlRenderer().renderSvg(source);
         if (result.isError()) {
@@ -158,10 +171,16 @@ public class SequencePlayerWindow {
         zoomResetButton.setOnAction(e -> setZoom(1.0));
         updateZoomLabel();
 
+        buildUpMode.setTooltip(new Tooltip(
+                "Draw only the calls that run, as they run - unchosen branches never appear, "
+                        + "a loop repeats as many times as you say, and lifelines arrive when first used"));
+        buildUpMode.selectedProperty().addListener((obs, was, now) -> { pause(); restart(); });
+
         HBox controls = new HBox(8, resetButton, stepBackButton, playButton, stepForwardButton,
                 new Label("Speed:"), speedSlider,
                 new Separator(Orientation.VERTICAL),
                 zoomOutButton, zoomResetButton, zoomInButton, zoomLabel, autoFit,
+                new Separator(Orientation.VERTICAL), buildUpMode,
                 spacer, endpointsLabel, followEditor, positionLabel);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8));
@@ -182,6 +201,14 @@ public class SequencePlayerWindow {
         WebEngine engine = diagramView.getEngine();
         engine.getLoadWorker().stateProperty().addListener((obs, old, state) -> {
             if (state != Worker.State.SUCCEEDED) return;
+            // Build-up mode reloads the page on every step, so each load hands over to
+            // whatever that step asked for rather than starting the run again.
+            if (buildUpMode.isSelected()) {
+                Runnable pending = afterLoad;
+                afterLoad = () -> { };
+                pending.run();
+                return;
+            }
             Object count = engine.executeScript("window.player.build()");
             stepCount = count instanceof Number n ? n.intValue() : 0;
             resolveStepLines(engine);
@@ -230,6 +257,17 @@ public class SequencePlayerWindow {
 
     /** Rewinds to the previously executed step, giving up any branch it steps back out of. */
     private void stepBack() {
+        if (buildUpMode.isSelected()) {
+            if (traceSteps == 0) return;
+            // The trace is only ever appended to, so going back means running it again
+            // from the start - cheap, since nothing is drawn until the end.
+            traceSteps--;
+            answerCursor = 0;
+            trace.reset();
+            for (int i = 0; i < traceSteps; i++) trace.step();
+            showTrace();
+            return;
+        }
         List<Integer> played = new ArrayList<>(executed);
         if (played.isEmpty()) return;
         played.remove(played.size() - 1);
@@ -266,7 +304,116 @@ public class SequencePlayerWindow {
         executed.clear();
         decisions.clear();
         current = -1;
-        renderCurrent();
+        if (buildUpMode.isSelected()) {
+            answers.clear();
+            answerCursor = 0;
+            traceSteps = 0;
+            trace = new TraceRun(script, askingDecider());
+            showTrace();
+        } else {
+            renderCurrent();
+        }
+    }
+
+    /**
+     * Replays answers already given before putting anything to the user, so rewinding
+     * and going forward again does not re-ask what was decided earlier in the run.
+     */
+    private TraceRun.Decider askingDecider() {
+        return new TraceRun.Decider() {
+            @Override
+            public int chooseBranch(ScriptModel.Block block) {
+                Integer replayed = nextRecordedAnswer();
+                if (replayed != null) return replayed;
+                List<String> labels = block.branches().stream().map(ScriptModel.Branch::label).toList();
+                if (labels.size() < 2) return record(0);
+                Integer picked = ask("Which branch?",
+                        "This " + block.kind() + " has more than one path. Which one runs?", labels);
+                return picked == null ? -1 : record(picked);
+            }
+
+            @Override
+            public int chooseIterations(ScriptModel.Block block) {
+                Integer replayed = nextRecordedAnswer();
+                if (replayed != null) return replayed;
+                List<String> options = List.of("1", "2", "3", "5", "10");
+                Integer picked = ask("How many times?",
+                        "Loop: " + block.branches().get(0).label() + "\nHow many iterations should run?", options);
+                return picked == null ? -1 : record(Integer.parseInt(options.get(picked)));
+            }
+        };
+    }
+
+    private Integer nextRecordedAnswer() {
+        return answerCursor < answers.size() ? answers.get(answerCursor++) : null;
+    }
+
+    private int record(int answer) {
+        answers.add(answer);
+        answerCursor = answers.size();
+        return answer;
+    }
+
+    /** @return index of the option chosen, or null if the user cancelled */
+    private Integer ask(String title, String header, List<String> options) {
+        boolean wasRunning = timeline.getStatus() == Animation.Status.RUNNING;
+        pause();
+
+        ChoiceDialog<String> dialog = new ChoiceDialog<>(options.get(0), options);
+        dialog.initOwner(stage);
+        dialog.setTitle(title);
+        dialog.setHeaderText(header);
+        dialog.setContentText("Choose:");
+        Optional<String> answer = dialog.showAndWait();
+        if (answer.isEmpty()) return null;
+
+        if (wasRunning) {
+            startTimeline();
+            playButton.setText("⏸  Pause");
+        }
+        return options.indexOf(answer.get());
+    }
+
+    /** Renders the trace as it now stands and shows it. */
+    private void showTrace() {
+        // A diagram with nothing in it is not a diagram as far as PlantUML is concerned;
+        // it answers with its syntax-error picture. Before the first step there is
+        // genuinely nothing to draw, so say so instead of asking.
+        if (!trace.hasRunAnything()) {
+            afterLoad = () -> { };
+            diagramView.getEngine().loadContent(emptyTracePage());
+            endpointsLabel.setText("");
+            positionLabel.setText("0 run");
+            stepBackButton.setDisable(true);
+            stepForwardButton.setDisable(false);
+            return;
+        }
+
+        PlantUmlRenderer.SvgRenderResult result = new PlantUmlRenderer().renderSvg(trace.currentSource());
+        if (result.isError()) {
+            positionLabel.setText("Could not draw the trace");
+            return;
+        }
+        afterLoad = () -> {
+            WebEngine engine = diagramView.getEngine();
+            Object count = engine.executeScript("window.player.build()");
+            int drawn = count instanceof Number n ? n.intValue() : 0;
+            // Everything drawn has by definition run; the newest call is the current one.
+            String csv = java.util.stream.IntStream.range(0, drawn)
+                    .mapToObj(String::valueOf).collect(Collectors.joining(","));
+            current = drawn - 1;
+            Object payload = engine.executeScript(
+                    "window.player.render('" + csv + "'," + current + ")");
+            applyStepPayload(payload);
+            positionLabel.setText(traceSteps + " run");
+            stepBackButton.setDisable(traceSteps == 0);
+            stepForwardButton.setDisable(false);
+        };
+        diagramView.getEngine().loadContent(wrap(result.svg(), background));
+
+        if (followEditor.isSelected() && trace.lastSourceLine() >= 0) {
+            onStepLine.accept(trace.lastSourceLine());
+        }
     }
 
     /**
@@ -275,6 +422,12 @@ public class SequencePlayerWindow {
      * Returns false once the run is over.
      */
     private boolean advance() {
+        if (buildUpMode.isSelected()) {
+            if (!trace.step()) return false;
+            traceSteps++;
+            showTrace();
+            return true;
+        }
         int candidate = current + 1;
         while (candidate < stepCount) {
             List<BlockModel.Choice> path = pathOf(candidate);
@@ -341,10 +494,16 @@ public class SequencePlayerWindow {
         Object result = diagramView.getEngine()
                 .executeScript("window.player.render('" + csv + "'," + current + ")");
         updatePosition();
+        applyStepPayload(result);
+    }
 
-        // "href | from | to | spanPx | viewportPx" - the participants and the span are
-        // resolved in the page, where the rendered geometry says which lifelines the
-        // arrow actually runs between and how far apart they are.
+    /**
+     * Reads back what the page worked out about the step just drawn:
+     * "href | from | to | spanPx | viewportPx". The participants and the span are
+     * resolved there, where the rendered geometry says which lifelines the arrow
+     * actually runs between and how far apart they are.
+     */
+    private void applyStepPayload(Object result) {
         String[] parts = result instanceof String s && !s.isBlank() ? s.split("\u0001", -1) : new String[0];
         if (parts.length >= 3) {
             endpointsLabel.setText(parts[1].isBlank() && parts[2].isBlank()
@@ -455,6 +614,17 @@ public class SequencePlayerWindow {
                   .participant-current text { fill: #B3261E !important; font-weight: bold; }
                 </style></head><body>%s<script>%s</script></body></html>
                 """.formatted(background, svg, playerScript());
+    }
+
+    private String emptyTracePage() {
+        return """
+                <!DOCTYPE html>
+                <html><head><meta charset="utf-8"><style>
+                  html, body { margin: 0; height: 100%%; background: %s;
+                               font-family: 'Segoe UI', sans-serif; color: #6B7280; }
+                  div { height: 100%%; display: flex; align-items: center; justify-content: center; }
+                </style></head><body><div>Nothing has run yet - press Play or Step.</div></body></html>
+                """.formatted(background);
     }
 
     private String playerScript() {
