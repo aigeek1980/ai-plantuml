@@ -29,11 +29,16 @@
     // How far right of a frame edge its tab shape, and then its condition text, may sit.
     var FRAME_TAB_REACH = 140;
     var FRAME_LABEL_REACH = 520;
+    // How near a marker a stray label must be to belong to it.
+    var MARKER_LABEL_BAND = 14;
+    // Tolerance when judging whether a rule reaches a frame edge to edge.
+    var FRAME_EDGE_SLACK = 6;
     var PAN_THRESHOLD = 4;
 
     var steps = [];
     var participants = [];
     var frames = [];
+    var markers = [];
 
     // A participant's text runs its guillemet stereotype together with its name.
     function cleanName(text) {
@@ -55,7 +60,7 @@
     }
 
     function build() {
-        steps = []; participants = []; frames = [];
+        steps = []; participants = []; frames = []; markers = [];
 
         var diagramHeight = document.documentElement.scrollHeight;
 
@@ -66,7 +71,8 @@
             var br = docRect(boxes[b]);
             if (br.height < MIN_FRAME_HEIGHT || br.width < MIN_FRAME_WIDTH) continue;
             if (br.height > diagramHeight * FULL_HEIGHT_RATIO) continue;
-            frames.push({ el: boxes[b], left: br.left, top: br.top, bottom: br.bottom, texts: [] });
+            frames.push({ el: boxes[b], left: br.left, right: br.right,
+                          top: br.top, bottom: br.bottom, texts: [] });
         }
 
         // The "alt" tab is a small shape in the frame's top-left corner. Left unclaimed,
@@ -164,6 +170,44 @@
         var maxArrowWidth = maxCentre > minCentre
             ? (maxCentre - minCentre) + ARROW_WIDTH_SLACK : Infinity;
 
+        // Rules too wide to be an arrow are "== separator ==" bars and the dotted line
+        // dividing one branch of an alt from the next. They mark a place in the flow, so
+        // they appear once the run passes them rather than standing there from the start -
+        // and a divider inside a frame only counts runs inside that same frame, so the
+        // branch not taken never announces itself.
+        for (var g = 0; g < geometry.length; g++) {
+            var mr = geometry[g].r;
+            if (geometry[g].el.__frameOwned) continue;
+            if (mr.height > MAX_ARROW_HEIGHT) continue;
+
+            var mid = mr.top + mr.height / 2;
+            var owner = null;
+            for (var f = 0; f < frames.length; f++) {
+                if (mid > frames[f].top && mid < frames[f].bottom) {
+                    if (owner === null || frames[f].top > owner.top) owner = frames[f];
+                }
+            }
+
+            // Too wide to be an arrow at all, or it stretches the full width of the frame
+            // it sits in - which a message between two of that frame's lifelines never
+            // does. Judging a divider by absolute width alone misses the ones inside a
+            // narrow frame, which is most of them.
+            var spansDiagram = mr.width > maxArrowWidth;
+            var spansFrame = owner !== null
+                    && mr.left <= owner.left + FRAME_EDGE_SLACK
+                    && mr.right >= owner.right - FRAME_EDGE_SLACK;
+            if (!spansDiagram && !spansFrame) continue;
+            var marker = { el: geometry[g].el, y: mid, frame: owner, texts: [] };
+            for (var t = 0; t < looseText.length; t++) {
+                if (looseText[t].el.__frameOwned) continue;
+                if (Math.abs(looseText[t].y - mid) > MARKER_LABEL_BAND) continue;
+                marker.texts.push(looseText[t].el);
+                looseText[t].el.__frameOwned = true;
+            }
+            geometry[g].el.__frameOwned = true;
+            markers.push(marker);
+        }
+
         for (var s = 0; s < messageOrder.length; s++) {
             var step = messageOrder[s];
 
@@ -197,6 +241,7 @@
             // Autonumber digits are drawn outside the message's link and would otherwise
             // linger after the step is hidden.
             for (var t = 0; t < looseText.length; t++) {
+                if (looseText[t].el.__frameOwned) continue;
                 if (looseText[t].y < step.top || looseText[t].y >= limit) continue;
                 step.parts.push(looseText[t].el);
             }
@@ -272,6 +317,10 @@
             frames[f].el.classList.remove('step-future');
             setClass(frames[f].texts, 'step-future', false);
         }
+        for (var m = 0; m < markers.length; m++) {
+            markers[m].el.classList.remove('step-future');
+            setClass(markers[m].texts, 'step-future', false);
+        }
     }
 
     /**
@@ -320,6 +369,29 @@
             } else {
                 frames[f].el.classList.add('step-future');
                 setClass(frames[f].texts, 'step-future', true);
+            }
+        }
+
+        // A separator or branch divider marks a place the run goes past, so it shows once
+        // something below it has run. For a divider inside a frame only runs inside that
+        // same frame count, which is what keeps the branch not taken from announcing
+        // itself with its own condition and dividing line.
+        for (var m = 0; m < markers.length; m++) {
+            var marker = markers[m];
+            var passed = false;
+            for (var s = 0; s < shownBands.length; s++) {
+                var band = shownBands[s];
+                if (band.mid <= marker.y) continue;
+                if (marker.frame && (band.mid < marker.frame.top || band.mid > marker.frame.bottom)) continue;
+                passed = true;
+                break;
+            }
+            if (passed) {
+                marker.el.classList.remove('step-future');
+                setClass(marker.texts, 'step-future', false);
+            } else {
+                marker.el.classList.add('step-future');
+                setClass(marker.texts, 'step-future', true);
             }
         }
 
