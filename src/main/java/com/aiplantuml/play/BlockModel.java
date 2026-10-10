@@ -49,11 +49,23 @@ public final class BlockModel {
         Deque<Integer> open = new ArrayDeque<>();
         boolean insideStyle = false;
         boolean insideNote = false;
+        boolean insideComment = false;
 
         for (int i = 0; i < lines.length; i++) {
             String trimmed = lines[i].strip();
             String lower = trimmed.toLowerCase(Locale.ROOT);
             String first = firstWord(lower);
+
+            // A /' ... '/ comment often holds a whole block kept for later, whose "end"
+            // would otherwise close a block that was never opened.
+            if (insideComment) {
+                if (trimmed.contains("'/")) insideComment = false;
+                continue;
+            }
+            if (trimmed.startsWith("/'")) {
+                insideComment = !trimmed.contains("'/");
+                continue;
+            }
 
             // The same traps as elsewhere: a <style> block's rules are named after
             // diagram keywords ("group {"), and a note's body is free text.

@@ -78,12 +78,26 @@ public final class ScriptModel {
         Deque<List<Node>> target = new ArrayDeque<>();
         Deque<Block> openBlocks = new ArrayDeque<>();
         target.push(body);
+        boolean insideComment = false;
 
         for (int i = 0; i < lines.length; i++) {
             String raw = lines[i];
             String trimmed = raw.strip();
             String lower = trimmed.toLowerCase(Locale.ROOT);
             String first = firstWord(lower);
+
+            // PlantUML's /' ... '/ comments out whole passages, and what is in there is
+            // often a block of real-looking diagram text kept for later. Left unhandled,
+            // it is drawn as though it were part of the flow, and its "end" lines close
+            // blocks that were never opened.
+            if (insideComment) {
+                if (trimmed.contains("'/")) insideComment = false;
+                continue;
+            }
+            if (trimmed.startsWith("/'")) {
+                insideComment = !trimmed.contains("'/");
+                continue;
+            }
 
             // A <style> block belongs to the setup wholesale: its rules are named after
             // diagram keywords and would otherwise read as statements.
