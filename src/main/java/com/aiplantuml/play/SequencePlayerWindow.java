@@ -376,22 +376,25 @@ public class SequencePlayerWindow {
 
     /** Renders the trace as it now stands and shows it. */
     private void showTrace() {
-        // A diagram with nothing in it is not a diagram as far as PlantUML is concerned;
-        // it answers with its syntax-error picture. Before the first step there is
-        // genuinely nothing to draw, so say so instead of asking.
-        if (!trace.hasRunAnything()) {
-            afterLoad = () -> { };
-            diagramView.getEngine().loadContent(emptyTracePage());
-            endpointsLabel.setText("");
-            positionLabel.setText("0 run");
-            stepBackButton.setDisable(true);
-            stepForwardButton.setDisable(false);
-            return;
-        }
+        // A trace can begin with statements that draw nothing on their own - a separator,
+        // or a note before any call. PlantUML cannot tell such a diagram is a sequence at
+        // all and answers with its syntax-error picture, so rather than guess which
+        // statements count as drawable, render first and fall back if it could not.
+        PlantUmlRenderer.SvgRenderResult result = trace.hasRunAnything()
+                ? new PlantUmlRenderer().renderSvg(trace.currentSource())
+                : null;
+        boolean drawable = result != null && !result.isError() && !result.svg().contains("Syntax Error");
 
-        PlantUmlRenderer.SvgRenderResult result = new PlantUmlRenderer().renderSvg(trace.currentSource());
-        if (result.isError()) {
-            positionLabel.setText("Could not draw the trace");
+        if (!drawable) {
+            afterLoad = () -> { };
+            diagramView.getEngine().loadContent(emptyTracePage(trace.stepsRun()));
+            endpointsLabel.setText("");
+            positionLabel.setText(traceSteps + " run");
+            stepBackButton.setDisable(traceSteps == 0);
+            stepForwardButton.setDisable(false);
+            if (followEditor.isSelected() && trace.lastSourceLine() >= 0) {
+                onStepLine.accept(trace.lastSourceLine());
+            }
             return;
         }
         afterLoad = () -> {
@@ -616,15 +619,18 @@ public class SequencePlayerWindow {
                 """.formatted(background, svg, playerScript());
     }
 
-    private String emptyTracePage() {
+    private String emptyTracePage(int statementsRun) {
+        String message = statementsRun == 0
+                ? "Nothing has run yet - press Play or Step."
+                : "Nothing to draw yet - the run has not reached a call.";
         return """
                 <!DOCTYPE html>
                 <html><head><meta charset="utf-8"><style>
                   html, body { margin: 0; height: 100%%; background: %s;
                                font-family: 'Segoe UI', sans-serif; color: #6B7280; }
                   div { height: 100%%; display: flex; align-items: center; justify-content: center; }
-                </style></head><body><div>Nothing has run yet - press Play or Step.</div></body></html>
-                """.formatted(background);
+                </style></head><body><div>%s</div></body></html>
+                """.formatted(background, message);
     }
 
     private String playerScript() {
