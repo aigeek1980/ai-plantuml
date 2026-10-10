@@ -3,6 +3,7 @@ package com.aiplantuml.ui;
 import com.aiplantuml.ai.KimiClient;
 import com.aiplantuml.config.AppConfig;
 import com.aiplantuml.config.WindowState;
+import com.aiplantuml.play.SequencePlayerWindow;
 import com.aiplantuml.render.DiagramNodeIndexer;
 import com.aiplantuml.render.PlantUmlRenderer;
 import javafx.animation.PauseTransition;
@@ -335,7 +336,12 @@ public class MainView extends BorderPane {
 
         MenuItem renderItem = new MenuItem("Render Now");
         renderItem.setOnAction(e -> renderNow());
-        Menu diagramMenu = new Menu("Diagram", null, renderItem);
+
+        MenuItem playItem = new MenuItem("Play Diagram...");
+        playItem.setOnAction(e -> new SequencePlayerWindow(
+                stage, editor.getText(), appConfig.getDiagramBackground(), this::moveCaretToLine));
+
+        Menu diagramMenu = new Menu("Diagram", null, renderItem, new SeparatorMenuItem(), playItem);
 
         MenuItem zoomInItem = new MenuItem("Zoom In");
         zoomInItem.setOnAction(e -> zoomIn());
