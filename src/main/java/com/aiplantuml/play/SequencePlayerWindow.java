@@ -18,23 +18,34 @@ import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ChoiceDialog;
+import javafx.scene.control.ComboBox;
+import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.ProgressBar;
 import javafx.scene.control.Separator;
 import javafx.scene.control.Slider;
 import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.Region;
+import javafx.scene.layout.VBox;
 import javafx.scene.web.WebEngine;
 import javafx.scene.web.WebView;
+import javafx.stage.DirectoryChooser;
+import javafx.stage.FileChooser;
+import javafx.stage.Modality;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -44,6 +55,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntConsumer;
 import java.util.stream.Collectors;
 
@@ -96,6 +108,13 @@ public class SequencePlayerWindow {
 
     /** Draws only what runs, rebuilding the diagram each step, instead of revealing it. */
     private final CheckBox buildUpMode = new CheckBox("Build up only what runs");
+    private final Button exportButton = new Button("Export...");
+    /**
+     * The first step that could actually be drawn. A run can open on a separator or a
+     * note, which PlantUML will not draw as a diagram at all, and those frames are no
+     * use in a film of the run.
+     */
+    private int firstDrawableStep = -1;
     private final ScriptModel script;
     private final String background;
     private TraceRun trace;
@@ -210,11 +229,18 @@ public class SequencePlayerWindow {
             }
         });
 
+        // Exporting means re-rendering the run frame by frame from its own sources,
+        // which only a build-up run has: a revealed one is CSS over a single drawing.
+        exportButton.setTooltip(new Tooltip(
+                "Save the run as an animated GIF, or as one image per step"));
+        exportButton.disableProperty().bind(buildUpMode.selectedProperty().not());
+        exportButton.setOnAction(e -> { pause(); exportRun(); });
+
         HBox controls = new HBox(8, resetButton, stepBackButton, playButton, stepForwardButton,
                 new Label("Speed:"), speedSlider,
                 new Separator(Orientation.VERTICAL),
                 zoomOutButton, zoomResetButton, zoomInButton, zoomLabel, autoFit,
-                new Separator(Orientation.VERTICAL), buildUpMode,
+                new Separator(Orientation.VERTICAL), buildUpMode, exportButton,
                 spacer, endpointsLabel, followEditor, positionLabel);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8));
@@ -368,6 +394,7 @@ public class SequencePlayerWindow {
             answerAtStep.clear();
             answerCursor = 0;
             traceSteps = 0;
+            firstDrawableStep = -1;
             trace = new TraceRun(script, askingDecider());
             showTrace();
         } else {
@@ -464,6 +491,221 @@ public class SequencePlayerWindow {
         return yes;
     }
 
+    /**
+     * Saves the run as it has been played. The frames are re-derived from the script
+     * rather than captured from the window, so the export does not depend on how the
+     * player happens to be scrolled, zoomed or sized.
+     */
+    private void exportRun() {
+        List<String> sources = playedSources();
+        if (sources.isEmpty()) {
+            info("Nothing to export yet",
+                    "Step or play through some of the run first - the export saves what has been drawn.");
+            return;
+        }
+        RunExporter.Options options = askExportOptions(sources.size());
+        if (options == null) return;
+
+        Path target = chooseTarget(options.format());
+        if (target == null) return;
+        startExport(sources, target, options);
+    }
+
+    /**
+     * The sources of each step played so far. The run is walked again from the start
+     * with the answers already given, which is both quicker than keeping every frame
+     * around and immune to having been rewound.
+     */
+    private List<String> playedSources() {
+        List<String> sources = new ArrayList<>();
+        if (firstDrawableStep < 0) return sources;
+
+        TraceRun replay = new TraceRun(script, new TraceRun.Decider() {
+            private int at = 0;
+
+            @Override
+            public int chooseBranch(ScriptModel.Block block) {
+                return at < answers.size() ? answers.get(at++) : 0;
+            }
+
+            @Override
+            public boolean repeatLoop(ScriptModel.Block block, int passesDone) {
+                return at < answers.size() && answers.get(at++) != 0;
+            }
+        });
+        for (int step = 1; step <= traceSteps && replay.step(); step++) {
+            if (step >= firstDrawableStep) sources.add(replay.currentSource());
+        }
+        return sources;
+    }
+
+    /** @return what to export, or null if the user backed out */
+    private RunExporter.Options askExportOptions(int frames) {
+        ComboBox<String> format = new ComboBox<>();
+        format.getItems().addAll("Animated GIF", "One PNG per step");
+        format.getSelectionModel().select(0);
+
+        ComboBox<String> scale = new ComboBox<>();
+        scale.getItems().addAll("100%", "75%", "50%", "25%");
+        scale.getSelectionModel().select(0);
+
+        GridPane grid = new GridPane();
+        grid.setHgap(10);
+        grid.setVgap(10);
+        grid.setPadding(new Insets(10, 10, 0, 10));
+        grid.addRow(0, new Label("Save as:"), format);
+        grid.addRow(1, new Label("Size:"), scale);
+
+        Label note = new Label(frames + (frames == 1 ? " step" : " steps")
+                + " to draw. A large diagram takes a second or two per step, and a long"
+                + "\nrun makes a big file - the smaller sizes are there for sharing.");
+        note.setStyle("-fx-text-fill: #6B7280;");
+        GridPane.setColumnSpan(note, 2);
+        grid.add(note, 0, 2);
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.initOwner(stage);
+        dialog.setTitle("Export run");
+        dialog.setHeaderText("Save this run as a picture of itself");
+        dialog.getDialogPane().setContent(grid);
+        dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
+        if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return null;
+
+        return new RunExporter.Options(
+                format.getSelectionModel().getSelectedIndex() == 0
+                        ? RunExporter.Format.GIF : RunExporter.Format.PNG_FRAMES,
+                switch (scale.getSelectionModel().getSelectedIndex()) {
+                    case 1 -> 0.75;
+                    case 2 -> 0.5;
+                    case 3 -> 0.25;
+                    default -> 1.0;
+                },
+                speedSlider.getValue());
+    }
+
+    private Path chooseTarget(RunExporter.Format format) {
+        if (format == RunExporter.Format.GIF) {
+            FileChooser chooser = new FileChooser();
+            chooser.setTitle("Save the run as a GIF");
+            chooser.setInitialFileName("diagram-run.gif");
+            chooser.getExtensionFilters().add(
+                    new FileChooser.ExtensionFilter("Animated GIF", "*.gif"));
+            File file = chooser.showSaveDialog(stage);
+            return file == null ? null : file.toPath();
+        }
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Choose a folder for the frames");
+        File directory = chooser.showDialog(stage);
+        if (directory == null) return null;
+
+        // A save dialog warns about replacing a file; nothing warns about replacing the
+        // frames of someone's last export, so this does.
+        Path folder = directory.toPath();
+        long existing = countFrames(folder);
+        if (existing > 0) {
+            Alert alert = new Alert(Alert.AlertType.CONFIRMATION,
+                    "That folder already holds " + existing + " exported frames.\n"
+                            + "Writing this run there will replace them.",
+                    ButtonType.OK, ButtonType.CANCEL);
+            alert.initOwner(stage);
+            alert.setHeaderText("Replace the frames already there?");
+            if (alert.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return null;
+        }
+        return folder;
+    }
+
+    private long countFrames(Path folder) {
+        try (var files = Files.list(folder)) {
+            return files.filter(path -> path.getFileName().toString().matches("step-\\d+\\.png")).count();
+        } catch (IOException e) {
+            return 0;
+        }
+    }
+
+    /** Runs the export off the UI thread, since it is a render per step. */
+    private void startExport(List<String> sources, Path target, RunExporter.Options options) {
+        Stage progressStage = new Stage();
+        progressStage.initOwner(stage);
+        progressStage.initModality(Modality.WINDOW_MODAL);
+        progressStage.setTitle("Exporting");
+        AppIcons.applyTo(progressStage);
+
+        Label message = new Label("Drawing step 1 of " + sources.size() + "...");
+        ProgressBar bar = new ProgressBar(0);
+        bar.setPrefWidth(320);
+        Button cancel = new Button("Cancel");
+        AtomicBoolean cancelled = new AtomicBoolean(false);
+        cancel.setOnAction(e -> {
+            cancelled.set(true);
+            cancel.setDisable(true);
+            message.setText("Stopping...");
+        });
+
+        VBox box = new VBox(12, message, bar, cancel);
+        box.setPadding(new Insets(16));
+        box.setAlignment(Pos.CENTER_LEFT);
+        progressStage.setScene(new Scene(box));
+        progressStage.setOnCloseRequest(e -> cancelled.set(true));
+        progressStage.show();
+
+        RunExporter.Progress progress = new RunExporter.Progress() {
+            @Override
+            public void rendered(int done, int total) {
+                Platform.runLater(() -> {
+                    bar.setProgress((double) done / total);
+                    message.setText("Drawing step " + Math.min(done + 1, total) + " of " + total + "...");
+                });
+            }
+
+            @Override
+            public boolean cancelled() {
+                return cancelled.get();
+            }
+        };
+
+        Thread worker = new Thread(() -> {
+            try {
+                RunExporter.Result result = RunExporter.export(sources, target, options, progress);
+                Platform.runLater(() -> {
+                    progressStage.close();
+                    if (result.frames() == 0) return;             // cancelled; nothing to say
+                    info("Export finished", describe(result, target, options));
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    progressStage.close();
+                    showError("The run could not be exported",
+                            e.getMessage() != null ? e.getMessage() : e.toString());
+                });
+            }
+        }, "run-export");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private String describe(RunExporter.Result result, Path target, RunExporter.Options options) {
+        StringBuilder text = new StringBuilder(result.frames() + " steps at "
+                + result.width() + " x " + result.height() + " pixels.\n\n" + target);
+        if (options.format() == RunExporter.Format.GIF) {
+            try {
+                text.append("\n\n").append(String.format("%.1f MB", Files.size(target) / 1048576.0));
+            } catch (IOException ignored) {
+                // The file is written; not being able to measure it is not worth reporting.
+            }
+        } else {
+            text.append("\n\nREADME.txt beside the frames has the ffmpeg command that turns"
+                    + "\nthem into a video.");
+        }
+        return text.toString();
+    }
+
+    private void info(String header, String message) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION, message, ButtonType.OK);
+        alert.initOwner(stage);
+        alert.setHeaderText(header);
+        alert.showAndWait();
+    }
+
     /** Renders the trace as it now stands and shows it. */
     private void showTrace() {
         // A trace can begin with statements that draw nothing on their own - a separator,
@@ -474,6 +716,7 @@ public class SequencePlayerWindow {
                 ? new PlantUmlRenderer().renderSvg(trace.currentSource())
                 : null;
         boolean drawable = result != null && !result.isError() && !result.svg().contains("Syntax Error");
+        if (drawable && firstDrawableStep < 0) firstDrawableStep = traceSteps;
 
         if (!drawable) {
             afterLoad = () -> { };
