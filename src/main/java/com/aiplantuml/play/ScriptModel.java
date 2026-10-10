@@ -232,9 +232,12 @@ public final class ScriptModel {
         return t.length() >= 2 && t.startsWith("\"") && t.endsWith("\"") ? t.substring(1, t.length() - 1) : t;
     }
 
+    /** Stands in for a missing label when one has to be shown; never written to a diagram. */
+    public static final String UNLABELLED = "(unlabelled)";
+
     private static String labelAfter(String trimmed, String keyword) {
         String rest = trimmed.substring(keyword.length()).strip();
-        return rest.isEmpty() ? "(unlabelled)" : rest;
+        return rest.isEmpty() ? UNLABELLED : rest;
     }
 
     private static boolean opensMultiLineNote(String lower) {

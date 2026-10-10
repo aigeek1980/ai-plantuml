@@ -163,7 +163,7 @@ public final class TraceRun {
         List<List<Out>> laneOut = new ArrayList<>();
         List<Deque<Frame>> lanes = new ArrayList<>();
 
-        for (ScriptModel.Branch branch : block.branches()) {
+        for (ScriptModel.Branch branch : splitIntoLanes(block)) {
             List<Out> lineup = new ArrayList<>();
             Deque<Frame> lane = new ArrayDeque<>();
             lane.push(new Sequence(branch.body(), 0, 0, null, lineup));
@@ -174,6 +174,44 @@ public final class TraceRun {
 
         out.add(new ParallelOut(labels, laneOut));
         return new Parallel(lanes, laneOut);
+    }
+
+    /**
+     * A par written without any "else" is a single branch, so running its branches
+     * together would run nothing together at all - yet what it describes is work
+     * happening at once on several lifelines. Such a block is split by lifeline, one
+     * lane each, so those statements do run together and are drawn side by side.
+     * <p>
+     * Only a block of plain statements is split; anything with a nested block inside is
+     * left exactly as written, since reordering around a decision is not safe.
+     */
+    private List<ScriptModel.Branch> splitIntoLanes(ScriptModel.Block block) {
+        if (block.branches().size() != 1) return block.branches();
+
+        List<ScriptModel.Node> body = block.branches().get(0).body();
+        if (body.isEmpty() || !body.stream().allMatch(n -> n instanceof ScriptModel.Line)) {
+            return block.branches();
+        }
+
+        java.util.LinkedHashMap<String, List<ScriptModel.Node>> byLifeline = new java.util.LinkedHashMap<>();
+        for (ScriptModel.Node node : body) {
+            ScriptModel.Line line = (ScriptModel.Line) node;
+            String key = String.join(",", line.aliases());
+            byLifeline.computeIfAbsent(key, k -> new ArrayList<>()).add(node);
+        }
+        if (byLifeline.size() < 2) return block.branches();
+
+        String blockLabel = block.branches().get(0).label();
+        List<ScriptModel.Branch> lanes = new ArrayList<>();
+        for (var entry : byLifeline.entrySet()) {
+            // The block's own label belongs to the first lane; the rest are named after
+            // the lifeline doing the work, which is more use than nothing.
+            String label = lanes.isEmpty() && !ScriptModel.UNLABELLED.equals(blockLabel)
+                    ? blockLabel
+                    : (entry.getKey().isBlank() ? ScriptModel.UNLABELLED : entry.getKey());
+            lanes.add(new ScriptModel.Branch(label, entry.getValue()));
+        }
+        return lanes;
     }
 
     public String currentSource() {
@@ -196,7 +234,12 @@ public final class TraceRun {
             boolean first = true;
             for (int lane = 0; lane < parallel.lanes().size(); lane++) {
                 if (parallel.lanes().get(lane).isEmpty()) continue;
-                body.append(first ? "par " : "else ").append(parallel.labels().get(lane)).append('\n');
+                // A missing label is a stand-in for showing the user, not something to
+                // write into the diagram as if it were the branch's name.
+                String label = parallel.labels().get(lane);
+                body.append(first ? "par" : "else");
+                if (!ScriptModel.UNLABELLED.equals(label)) body.append(' ').append(label);
+                body.append('\n');
                 write(parallel.lanes().get(lane), body);
                 first = false;
             }
