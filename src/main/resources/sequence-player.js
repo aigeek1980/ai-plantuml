@@ -5,21 +5,30 @@
 // link around the label text alone - so a link containing no shape is a message, and
 // sorting those by vertical position gives the order they happen in.
 //
-// Arrow geometry is matched to its label by position, and participants to an arrow by
-// where its ends land, because the SVG is flat: no grouping, no ids, nothing tying an
-// arrow to the text beside it or to the lifelines it spans.
+// Everything else is matched by position, because the SVG is flat: no grouping, no
+// ids, nothing tying an arrow to the text beside it, to the lifelines it spans, or to
+// the alt/group frame it sits inside.
 (function () {
 
     var LINK = 'node://';
     var SEP = '\u0001';
-    // Anything this tall is a lifeline or activation bar spanning the diagram, not an arrow.
+    // Anything this tall is a lifeline, an activation bar or a frame, not an arrow.
     var MAX_ARROW_HEIGHT = 48;
     // Slack when deciding whether an arrow end lands on a participant's column.
     var COLUMN_SLACK = 14;
+    // Smallest box treated as an alt/group frame rather than diagram furniture.
+    var MIN_FRAME_HEIGHT = 56;
+    var MIN_FRAME_WIDTH = 120;
+    // A box nearly as tall as the diagram is a participant grouping or the background,
+    // which belong to the diagram's structure and are always shown.
+    var FULL_HEIGHT_RATIO = 0.9;
+    // Band below a frame's top edge holding its "alt" tab and first condition.
+    var FRAME_HEADER_BAND = 26;
     var PAN_THRESHOLD = 4;
 
     var steps = [];
     var participants = [];
+    var frames = [];
 
     // A participant's text runs its guillemet stereotype together with its name.
     function cleanName(text) {
@@ -31,27 +40,66 @@
             || el.getAttributeNS('http://www.w3.org/1999/xlink', 'href');
     }
 
+    function docRect(el) {
+        var r = el.getBoundingClientRect();
+        return {
+            left: r.left + window.scrollX, right: r.right + window.scrollX,
+            top: r.top + window.scrollY, bottom: r.bottom + window.scrollY,
+            width: r.width, height: r.height
+        };
+    }
+
     function build() {
+        steps = []; participants = []; frames = [];
+
+        var diagramHeight = document.documentElement.scrollHeight;
+
+        // Frames first, so they can claim their own header text before the messages
+        // sweep up whatever loose text sits in their row.
+        var claimed = [];
+        var boxes = document.querySelectorAll('rect, path, polyline');
+        for (var b = 0; b < boxes.length; b++) {
+            var br = docRect(boxes[b]);
+            if (br.height < MIN_FRAME_HEIGHT || br.width < MIN_FRAME_WIDTH) continue;
+            if (br.height > diagramHeight * FULL_HEIGHT_RATIO) continue;
+            frames.push({ el: boxes[b], top: br.top, bottom: br.bottom, texts: [] });
+        }
+
         var geometry = [];
         var shapes = document.querySelectorAll('line, path, polygon');
         for (var g = 0; g < shapes.length; g++) {
-            geometry.push({ el: shapes[g], r: shapes[g].getBoundingClientRect() });
+            geometry.push({ el: shapes[g], r: docRect(shapes[g]) });
         }
 
-        // A label wrapped over several lines becomes several links sharing one target,
-        // and a participant is drawn at both the top and bottom of the diagram, so both
-        // are grouped by target rather than taken one element at a time.
-        var messagesByHref = {}, messageOrder = [];
-        var participantsByHref = {};
+        var looseText = [];
+        var texts = document.querySelectorAll('text');
+        for (var t = 0; t < texts.length; t++) {
+            if (texts[t].closest('a')) continue;
+            var tr = docRect(texts[t]);
+            if (!tr.width && !tr.height) continue;
+            var owner = null;
+            for (var f = 0; f < frames.length; f++) {
+                if (tr.top >= frames[f].top - 2 && tr.top <= frames[f].top + FRAME_HEADER_BAND) {
+                    owner = frames[f];
+                    break;
+                }
+            }
+            if (owner) { owner.texts.push(texts[t]); claimed.push(texts[t]); }
+            else { looseText.push({ el: texts[t], y: tr.top + tr.height / 2 }); }
+        }
 
+        var messagesByHref = {}, messageOrder = [], participantsByHref = {};
         var anchors = document.querySelectorAll('a');
         for (var i = 0; i < anchors.length; i++) {
             var a = anchors[i];
             var href = linkOf(a);
             if (!href || href.indexOf(LINK) !== 0) continue;
-            var r = a.getBoundingClientRect();
+            var r = docRect(a);
             if (!r.height) continue;
 
+            // A participant is drawn at the top and bottom of the diagram; a label
+            // wrapped over several lines becomes several links sharing one target. Both
+            // are grouped by target rather than taken one element at a time.
             if (a.querySelector('rect, path, polygon, ellipse')) {
                 var p = participantsByHref[href];
                 if (!p) {
@@ -80,25 +128,14 @@
         }
         messageOrder.sort(function (p, q) { return p.mid - q.mid; });
 
-        // Autonumber digits are drawn as their own text, outside the message's link, so
-        // they have to be claimed by position or they linger after the step is hidden.
-        var looseText = [];
-        var texts = document.querySelectorAll('text');
-        for (var t = 0; t < texts.length; t++) {
-            if (texts[t].closest('a')) continue;
-            var tr = texts[t].getBoundingClientRect();
-            if (!tr.width && !tr.height) continue;
-            looseText.push({ el: texts[t], y: tr.top + tr.height / 2 });
-        }
-
         for (var s = 0; s < messageOrder.length; s++) {
             var step = messageOrder[s];
 
             // A message owns everything from its label down to the next message's label.
-            // PlantUML draws the label above its arrow, so this captures the arrow and the
-            // several segments of a self-message loop, while excluding both the next
-            // message's arrow and anything on the row above - a "..." delay line spans the
-            // full width, and sweeping that in made messages look as though they ran
+            // PlantUML draws the label above its arrow, so this captures the arrow and
+            // the several segments of a self-message loop, while excluding both the next
+            // message's arrow and anything on the row above - a "..." delay line spans
+            // the full width, and sweeping that in made messages look as though they ran
             // between the outermost participants.
             var limit = s + 1 < messageOrder.length ? messageOrder[s + 1].top : Infinity;
 
@@ -119,6 +156,8 @@
                 }
             }
 
+            // Autonumber digits are drawn outside the message's link and would otherwise
+            // linger after the step is hidden.
             for (var t = 0; t < looseText.length; t++) {
                 if (looseText[t].y < step.top || looseText[t].y >= limit) continue;
                 step.parts.push(looseText[t].el);
@@ -160,6 +199,21 @@
         return pointsLeft ? { from: right, to: left } : { from: left, to: right };
     }
 
+    /** Horizontal span that must be on screen for a step: both its lifelines, end to end. */
+    function spanOf(step) {
+        var ends = endpointsOf(step);
+        var min = step.minX, max = step.maxX;
+        var sides = [ends.from, ends.to];
+        for (var i = 0; i < sides.length; i++) {
+            if (!sides[i]) continue;
+            for (var b = 0; b < sides[i].boxes.length; b++) {
+                min = Math.min(min, sides[i].boxes[b].left);
+                max = Math.max(max, sides[i].boxes[b].right);
+            }
+        }
+        return { min: min, max: max, ends: ends };
+    }
+
     function setClass(els, name, on) {
         for (var i = 0; i < els.length; i++) {
             if (on) els[i].classList.add(name); else els[i].classList.remove(name);
@@ -175,6 +229,10 @@
         }
         for (var p = 0; p < participants.length; p++) {
             setClass(participants[p].els, 'participant-current', false);
+        }
+        for (var f = 0; f < frames.length; f++) {
+            frames[f].el.classList.remove('step-future');
+            setClass(frames[f].texts, 'step-future', false);
         }
     }
 
@@ -200,10 +258,31 @@
             for (var k = 0; k < ids.length; k++) executed[parseInt(ids[k], 10)] = true;
         }
 
+        var shownBands = [];
         for (var i = 0; i < steps.length; i++) {
             var shown = (i === index) || executed[i] === true;
             setClass(steps[i].els, 'step-future', !shown);
             setClass(steps[i].parts, 'step-future', !shown);
+            if (shown) shownBands.push(steps[i]);
+        }
+
+        // An alt or group frame is part of the flow, not the backdrop: it appears only
+        // once something inside it has run, rather than standing empty beforehand.
+        for (var f = 0; f < frames.length; f++) {
+            var entered = false;
+            for (var s = 0; s < shownBands.length; s++) {
+                if (shownBands[s].mid >= frames[f].top && shownBands[s].mid <= frames[f].bottom) {
+                    entered = true;
+                    break;
+                }
+            }
+            if (entered) {
+                frames[f].el.classList.remove('step-future');
+                setClass(frames[f].texts, 'step-future', false);
+            } else {
+                frames[f].el.classList.add('step-future');
+                setClass(frames[f].texts, 'step-future', true);
+            }
         }
 
         if (index < 0 || index >= steps.length) return '';
@@ -211,18 +290,32 @@
         setClass(step.els, 'step-current', true);
         setClass(step.parts, 'step-current', true);
 
-        var ends = endpointsOf(step);
-        if (ends.from) setClass(ends.from.els, 'participant-current', true);
-        if (ends.to) setClass(ends.to.els, 'participant-current', true);
+        var span = spanOf(step);
+        if (span.ends.from) setClass(span.ends.from.els, 'participant-current', true);
+        if (span.ends.to) setClass(span.ends.to.els, 'participant-current', true);
 
+        return step.href + SEP + (span.ends.from ? span.ends.from.name : '')
+                         + SEP + (span.ends.to ? span.ends.to.name : '')
+                         + SEP + Math.round(span.max - span.min)
+                         + SEP + Math.round(window.innerWidth);
+    }
+
+    /** Brings the step, and the whole span between its two lifelines, into view. */
+    function centre(index) {
+        if (index < 0 || index >= steps.length) return '';
+        var step = steps[index];
+        var span = spanOf(step);
+
+        if (span.min !== Infinity) {
+            var middle = (span.min + span.max) / 2;
+            window.scrollTo(Math.max(0, middle - window.innerWidth / 2), window.scrollY);
+        }
         var r = step.els[0].getBoundingClientRect();
         var margin = window.innerHeight * 0.25;
         if (r.top < margin || r.bottom > window.innerHeight - margin) {
             window.scrollBy(0, r.top - window.innerHeight / 2);
         }
-
-        return step.href + SEP + (ends.from ? ends.from.name : '')
-                         + SEP + (ends.to ? ends.to.name : '');
+        return '';
     }
 
     // Drag to move the diagram. Deliberately a local copy rather than shared with the
@@ -271,6 +364,7 @@
     window.player = {
         build: build,
         render: render,
+        centre: centre,
         count: function () { return steps.length; },
         // Every step's target, in order, so the caller can resolve each to a source line
         // once rather than asking again on each step.

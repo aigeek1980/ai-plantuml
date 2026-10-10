@@ -8,6 +8,7 @@ import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.concurrent.Worker;
 import javafx.geometry.Insets;
+import javafx.geometry.Orientation;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
@@ -16,7 +17,9 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ChoiceDialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.Separator;
 import javafx.scene.control.Slider;
+import javafx.scene.control.Tooltip;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Priority;
@@ -60,6 +63,12 @@ public class SequencePlayerWindow {
     private static final double MAX_STEP_SECONDS = 3.0;
     private static final double DEFAULT_STEP_SECONDS = 1.0;
 
+    private static final double MIN_ZOOM = 0.2;
+    private static final double MAX_ZOOM = 3.0;
+    private static final double ZOOM_STEP = 1.25;
+    /** Leaves a little room either side rather than fitting the span exactly to the edges. */
+    private static final double FIT_MARGIN = 1.12;
+
     private final Stage stage = new Stage();
     private final WebView diagramView = new WebView();
     private final Label positionLabel = new Label();
@@ -70,6 +79,11 @@ public class SequencePlayerWindow {
     private final Button resetButton = new Button("⏮");
     private final Slider speedSlider = new Slider(MIN_STEP_SECONDS, MAX_STEP_SECONDS, DEFAULT_STEP_SECONDS);
     private final CheckBox followEditor = new CheckBox("Follow in editor");
+    private final CheckBox autoFit = new CheckBox("Fit to call");
+    private final Button zoomInButton = new Button("+");
+    private final Button zoomOutButton = new Button("−");
+    private final Button zoomResetButton = new Button("100%");
+    private final Label zoomLabel = new Label();
 
     private final Map<String, Integer> nodeLineNumbers;
     private final IntConsumer onStepLine;
@@ -132,8 +146,18 @@ public class SequencePlayerWindow {
         // since on a long diagram their boxes can be scrolled far off screen.
         endpointsLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #B3261E;");
 
+        autoFit.setSelected(true);
+        autoFit.setTooltip(new Tooltip("Zoom out when a call's two lifelines don't both fit on screen"));
+        zoomInButton.setOnAction(e -> setZoom(diagramView.getZoom() * ZOOM_STEP));
+        zoomOutButton.setOnAction(e -> setZoom(diagramView.getZoom() / ZOOM_STEP));
+        zoomResetButton.setOnAction(e -> setZoom(1.0));
+        updateZoomLabel();
+
         HBox controls = new HBox(8, resetButton, stepBackButton, playButton, stepForwardButton,
-                new Label("Speed:"), speedSlider, spacer, endpointsLabel, followEditor, positionLabel);
+                new Label("Speed:"), speedSlider,
+                new Separator(Orientation.VERTICAL),
+                zoomOutButton, zoomResetButton, zoomInButton, zoomLabel, autoFit,
+                spacer, endpointsLabel, followEditor, positionLabel);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8));
         controls.setStyle("-fx-background-color: #F2F3F5; "
@@ -313,17 +337,50 @@ public class SequencePlayerWindow {
                 .executeScript("window.player.render('" + csv + "'," + current + ")");
         updatePosition();
 
-        // "href \u0001 from \u0001 to" - the participants are resolved in the page, where
-        // the rendered geometry says which lifelines the arrow actually runs between.
+        // "href | from | to | spanPx | viewportPx" - the participants and the span are
+        // resolved in the page, where the rendered geometry says which lifelines the
+        // arrow actually runs between and how far apart they are.
         String[] parts = result instanceof String s && !s.isBlank() ? s.split("\u0001", -1) : new String[0];
-        if (parts.length == 3) {
+        if (parts.length >= 3) {
             endpointsLabel.setText(parts[1].isBlank() && parts[2].isBlank()
                     ? "" : parts[1] + "  →  " + parts[2]);
         } else {
             endpointsLabel.setText("");
         }
+        if (parts.length >= 5) {
+            fitToCall(parseOrZero(parts[3]), parseOrZero(parts[4]));
+        }
         if (followEditor.isSelected() && parts.length > 0 && !parts[0].isBlank()) {
             lineFor(parts[0]).ifPresent(onStepLine::accept);
+        }
+    }
+
+    /**
+     * Zooms out far enough that the call's two lifelines are both on screen, then
+     * centres on it. Only ever zooms out: zooming back in after every short call would
+     * make the diagram lurch between steps.
+     */
+    private void fitToCall(double spanPx, double viewportPx) {
+        if (autoFit.isSelected() && spanPx > 0 && viewportPx > 0 && spanPx * FIT_MARGIN > viewportPx) {
+            setZoom(diagramView.getZoom() * viewportPx / (spanPx * FIT_MARGIN));
+        }
+        diagramView.getEngine().executeScript("window.player.centre(" + current + ")");
+    }
+
+    private void setZoom(double zoom) {
+        diagramView.setZoom(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom)));
+        updateZoomLabel();
+    }
+
+    private void updateZoomLabel() {
+        zoomLabel.setText(Math.round(diagramView.getZoom() * 100) + "%");
+    }
+
+    private static double parseOrZero(String text) {
+        try {
+            return Double.parseDouble(text.trim());
+        } catch (NumberFormatException e) {
+            return 0;
         }
     }
 
