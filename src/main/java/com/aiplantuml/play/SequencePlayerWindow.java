@@ -4,6 +4,7 @@ import com.aiplantuml.render.DiagramNodeIndexer;
 import com.aiplantuml.render.PlantUmlRenderer;
 import com.aiplantuml.ui.AppIcons;
 import javafx.animation.Animation;
+import javafx.application.Platform;
 import javafx.animation.KeyFrame;
 import javafx.animation.Timeline;
 import javafx.concurrent.Worker;
@@ -68,6 +69,8 @@ public class SequencePlayerWindow {
     private static final double ZOOM_STEP = 1.25;
     /** Leaves a little room either side rather than fitting the span exactly to the edges. */
     private static final double FIT_MARGIN = 1.12;
+    /** Relative zoom change below which the view is left alone. */
+    private static final double ZOOM_DEADBAND = 0.05;
 
     private final Stage stage = new Stage();
     private final WebView diagramView = new WebView();
@@ -95,6 +98,8 @@ public class SequencePlayerWindow {
     /** Branch picked for each alt, remembered for the rest of the run. */
     private final Map<Integer, Integer> decisions = new HashMap<>();
 
+    /** The zoom last set by hand; auto-fit works down from it and never past it. */
+    private double manualZoom = 1.0;
     private int[] stepLines = new int[0];
     private int stepCount = 0;
     private int current = -1;
@@ -356,19 +361,37 @@ public class SequencePlayerWindow {
     }
 
     /**
-     * Zooms out far enough that the call's two lifelines are both on screen, then
-     * centres on it. Only ever zooms out: zooming back in after every short call would
-     * make the diagram lurch between steps.
+     * Zooms so the call's two lifelines are both on screen, then centres on it. Zooms
+     * back in as well as out, so a wide call does not leave the rest of the run shrunk,
+     * but never past the zoom last chosen by hand - fitting a self-call to the window
+     * would magnify it absurdly.
      */
     private void fitToCall(double spanPx, double viewportPx) {
-        if (autoFit.isSelected() && spanPx > 0 && viewportPx > 0 && spanPx * FIT_MARGIN > viewportPx) {
-            setZoom(diagramView.getZoom() * viewportPx / (spanPx * FIT_MARGIN));
+        if (autoFit.isSelected() && spanPx > 0 && viewportPx > 0) {
+            double current = diagramView.getZoom();
+            double target = Math.min(manualZoom, current * viewportPx / (spanPx * FIT_MARGIN));
+            target = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, target));
+            // A deadband keeps near-identical calls from nudging the zoom every step.
+            if (Math.abs(target - current) / current > ZOOM_DEADBAND) {
+                diagramView.setZoom(target);
+                updateZoomLabel();
+                // The page only learns how much is visible on the next layout pass, so
+                // centring has to wait for it.
+                Platform.runLater(this::centreOnCurrent);
+                return;
+            }
         }
+        centreOnCurrent();
+    }
+
+    private void centreOnCurrent() {
         diagramView.getEngine().executeScript("window.player.centre(" + current + ")");
     }
 
+    /** Zoom chosen from the buttons, which is the ceiling auto-fit works down from. */
     private void setZoom(double zoom) {
-        diagramView.setZoom(Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom)));
+        manualZoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, zoom));
+        diagramView.setZoom(manualZoom);
         updateZoomLabel();
     }
 
