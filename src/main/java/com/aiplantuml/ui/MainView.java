@@ -32,6 +32,7 @@ import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.KeyCode;
 import javafx.scene.input.KeyCodeCombination;
 import javafx.scene.input.KeyCombination;
+import javafx.scene.input.KeyEvent;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.input.ScrollEvent;
 import javafx.scene.layout.BorderPane;
@@ -82,6 +83,8 @@ public class MainView extends BorderPane {
     private QuestionPane questionPane;
 
     private File currentFile;
+    /** Whether the caret is somewhere the user put it, which is what the player starts from. */
+    private boolean caretPlaced = false;
     private boolean dirty = false;
     private AppConfig appConfig = AppConfig.load();
     private final WindowState windowState = WindowState.load();
@@ -101,6 +104,10 @@ public class MainView extends BorderPane {
         editor.getStylesheets().add(getClass().getResource("/plantuml-highlighting.css").toExternalForm());
         editor.setStyleSpans(0, PlantUmlHighlighter.computeHighlighting(DEFAULT_SOURCE));
         editor.setContextMenu(buildEditorContextMenu());
+        // A caret sitting at the top of a freshly opened file is where it was left, not
+        // where anyone put it, and the player should not read that as "start here".
+        editor.addEventFilter(MouseEvent.MOUSE_PRESSED, e -> caretPlaced = true);
+        editor.addEventFilter(KeyEvent.KEY_PRESSED, e -> caretPlaced = true);
 
         diagramView.setContextMenuEnabled(false);
         diagramView.addEventFilter(ScrollEvent.SCROLL, this::onDiagramScroll);
@@ -339,10 +346,13 @@ public class MainView extends BorderPane {
 
         MenuItem playItem = new MenuItem("Play Diagram...");
         // The run starts where the caret is, so a long diagram can be picked up at the
-        // part being worked on rather than always from the top.
+        // part being worked on - but only if the caret is somewhere the user put it.
+        // Following along in the editor moves it too, and that is the player's own
+        // doing, so it must not decide where the next run begins.
         playItem.setOnAction(e -> new SequencePlayerWindow(
-                stage, editor.getText(), editor.getCurrentParagraph(),
-                appConfig.getDiagramBackground(), this::moveCaretToLine));
+                stage, editor.getText(), caretPlaced ? editor.getCurrentParagraph() : 0,
+                diagramName(), appConfig.getDiagramBackground(),
+                line -> moveCaretToLine(line, false)));
 
         Menu diagramMenu = new Menu("Diagram", null, renderItem, new SeparatorMenuItem(), playItem);
 
@@ -430,9 +440,20 @@ public class MainView extends BorderPane {
         Clipboard.getSystemClipboard().setContent(content);
     }
 
+    /** What this diagram is called, for naming anything saved out of it. */
+    private String diagramName() {
+        return currentFile != null ? stripExtension(currentFile.getName()) : "diagram";
+    }
+
+    /** Jumping here from a click on the diagram is still the user choosing a place. */
     private void moveCaretToLine(int lineIndex) {
+        moveCaretToLine(lineIndex, true);
+    }
+
+    private void moveCaretToLine(int lineIndex, boolean userChoice) {
         String[] lines = editor.getText().split("\n", -1);
         if (lineIndex < 0 || lineIndex >= lines.length) return;
+        if (userChoice) caretPlaced = true;
         int offset = 0;
         for (int i = 0; i < lineIndex; i++) {
             offset += lines[i].length() + 1;
@@ -498,6 +519,7 @@ public class MainView extends BorderPane {
         if (!confirmDiscardIfDirty()) return;
         editor.replaceText(DEFAULT_SOURCE);
         currentFile = null;
+        caretPlaced = false;
         dirty = false;
         updateTitle();
     }
@@ -514,6 +536,7 @@ public class MainView extends BorderPane {
             String content = Files.readString(file.toPath(), StandardCharsets.UTF_8);
             editor.replaceText(content);
             currentFile = file;
+            caretPlaced = false;
             dirty = false;
             updateTitle();
             rememberDirectory(file);

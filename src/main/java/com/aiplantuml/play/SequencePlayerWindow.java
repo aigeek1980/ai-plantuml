@@ -53,6 +53,8 @@ import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -118,6 +120,7 @@ public class SequencePlayerWindow {
 
     private final Map<String, Integer> nodeLineNumbers;
     private final IntConsumer onStepLine;
+    private final String diagramName;
     private final Timeline timeline = new Timeline();
     private final BlockModel blocks;
 
@@ -173,12 +176,14 @@ public class SequencePlayerWindow {
      * @param owner          window to sit above; the player is non-modal so the editor stays usable
      * @param source         snapshot of the diagram to play
      * @param startLine      0-based line the caret was on, where the run begins
+     * @param diagramName    what the diagram is called, for naming an export after it
      * @param background     diagram pane background, so the player matches the editor's look
      * @param onStepLine     called with the 0-based source line of each step, for editor follow
      */
-    public SequencePlayerWindow(Stage owner, String source, int startLine, String background,
-                                IntConsumer onStepLine) {
+    public SequencePlayerWindow(Stage owner, String source, int startLine, String diagramName,
+                                String background, IntConsumer onStepLine) {
         this.onStepLine = onStepLine;
+        this.diagramName = diagramName;
         this.blocks = BlockModel.parse(source);
 
         ScriptModel whole = ScriptModel.parse(source);
@@ -695,11 +700,26 @@ public class SequencePlayerWindow {
                 delay.getValue());
     }
 
+    /**
+     * The diagram's own name, what it is, and when it was taken - so a folder of these
+     * says which diagram each came from and which run is the latest, without opening any.
+     */
+    private String defaultGifName() {
+        String stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss"));
+        return safeFileName(diagramName) + " - play - " + stamp + ".gif";
+    }
+
+    /** Keeps a diagram's name usable as a file name, whatever it has in it. */
+    private static String safeFileName(String name) {
+        String cleaned = name.replaceAll("[\\\\/:*?\"<>|]", "-").strip();
+        return cleaned.isEmpty() ? "diagram" : cleaned;
+    }
+
     private Path chooseTarget(RunExporter.Format format) {
         if (format == RunExporter.Format.GIF) {
             FileChooser chooser = new FileChooser();
             chooser.setTitle("Save the run as a GIF");
-            chooser.setInitialFileName("diagram-run.gif");
+            chooser.setInitialFileName(defaultGifName());
             chooser.getExtensionFilters().add(
                     new FileChooser.ExtensionFilter("Animated GIF", "*.gif"));
             File file = chooser.showSaveDialog(stage);
