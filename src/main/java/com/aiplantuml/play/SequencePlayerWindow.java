@@ -98,8 +98,10 @@ public class SequencePlayerWindow {
     private final ScriptModel script;
     private final String background;
     private TraceRun trace;
-    /** Answers given so far, replayed verbatim when rewinding so nothing is asked twice. */
+    /** Answers given so far, replayed when rewinding so nothing already passed is re-asked. */
     private final List<Integer> answers = new ArrayList<>();
+    /** How many statements had run when each answer was given, so rewinding can drop it. */
+    private final List<Integer> answerAtStep = new ArrayList<>();
     private int answerCursor = 0;
     private int traceSteps = 0;
     private Runnable afterLoad = () -> { };
@@ -262,6 +264,12 @@ public class SequencePlayerWindow {
             // The trace is only ever appended to, so going back means running it again
             // from the start - cheap, since nothing is drawn until the end.
             traceSteps--;
+            // Answers given beyond where we have rewound to are given up, so a branch
+            // stepped back out of is offered again rather than silently reused.
+            while (!answerAtStep.isEmpty() && answerAtStep.get(answerAtStep.size() - 1) >= traceSteps) {
+                answerAtStep.remove(answerAtStep.size() - 1);
+                answers.remove(answers.size() - 1);
+            }
             answerCursor = 0;
             trace.reset();
             for (int i = 0; i < traceSteps; i++) trace.step();
@@ -306,6 +314,7 @@ public class SequencePlayerWindow {
         current = -1;
         if (buildUpMode.isSelected()) {
             answers.clear();
+            answerAtStep.clear();
             answerCursor = 0;
             traceSteps = 0;
             trace = new TraceRun(script, askingDecider());
@@ -350,6 +359,9 @@ public class SequencePlayerWindow {
 
     private int record(int answer) {
         answers.add(answer);
+        // The question is asked while working out the next statement, so this is the
+        // count it follows - which is what lets a rewind past it throw it away.
+        answerAtStep.add(trace.stepsRun());
         answerCursor = answers.size();
         return answer;
     }
