@@ -1,7 +1,5 @@
 package com.aiplantuml.play;
 
-import com.aiplantuml.render.PlantUmlRenderer;
-
 import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
@@ -26,24 +24,23 @@ import java.util.List;
 import java.util.stream.Stream;
 
 /**
- * Turns a played run into something that can be shared: an animated GIF, or the frames
- * as separate images.
+ * Turns the frames recorded while a run was played into something that can be shared:
+ * an animated GIF, or the frames as separate images.
  * <p>
- * Frames are rendered from each step's own PlantUML source rather than captured from the
- * window, so what comes out is the full diagram at its own resolution however the player
- * happened to be scrolled or zoomed.
+ * The frames are pictures of the player itself, taken as each step was drawn, so what
+ * comes out is what was watched - the current call in red, the lifelines it runs between
+ * picked out, and nothing of the steps still to come.
  * <p>
- * A build-up run grows as it goes, so every frame is laid out on a canvas the size of the
- * largest one. Without that a GIF would take its size from the first frame and clip the
- * rest of the run to the two lifelines it started with.
+ * Frames are still laid out on a shared canvas the size of the largest: the window can be
+ * resized part way through a run, and a GIF takes its size from its first frame.
  */
 public final class RunExporter {
 
     public enum Format { GIF, PNG_FRAMES }
 
     /**
-     * @param scale          1.0 for the diagram's own size; less to keep a long run's file down
-     * @param secondsPerStep how long each frame is held, taken from the player's speed
+     * @param scale          1.0 for the frames' own size; less to keep a long run's file down
+     * @param secondsPerStep how long each frame is held
      */
     public record Options(Format format, double scale, double secondsPerStep) { }
 
@@ -66,66 +63,44 @@ public final class RunExporter {
     public record Result(int frames, int width, int height) { }
 
     /**
-     * @param sources one PlantUML source per step, in the order they were played
-     * @param target  the .gif to write, or the directory to fill with frames
+     * @param frames one PNG per step, recorded as the run was played
+     * @param target the .gif to write, or the directory to fill with frames
      */
-    public static Result export(List<String> sources, Path target, Options options, Progress progress)
+    public static Result export(List<Path> frames, Path target, Options options, Progress progress)
             throws IOException {
-        if (sources.isEmpty()) return new Result(0, 0, 0);
+        if (frames.isEmpty()) return new Result(0, 0, 0);
 
-        Path work = Files.createTempDirectory("aiplantuml-export");
-        try {
-            int[] canvas = renderFrames(sources, work, progress);
-            if (canvas == null) return new Result(0, 0, 0);     // cancelled part way
-            int frames = options.format() == Format.GIF
-                    ? writeGif(sources.size(), work, canvas, target, options, progress)
-                    : writeFrames(sources.size(), work, canvas, target, options, progress);
-            return new Result(frames,
-                    (int) Math.round(canvas[0] * options.scale()),
-                    (int) Math.round(canvas[1] * options.scale()));
-        } finally {
-            deleteTree(work);
-        }
+        int[] canvas = measure(frames);
+        int written = options.format() == Format.GIF
+                ? writeGif(frames, canvas, target, options, progress)
+                : writeFrames(frames, canvas, target, options, progress);
+        return new Result(written,
+                (int) Math.round(canvas[0] * options.scale()),
+                (int) Math.round(canvas[1] * options.scale()));
     }
 
-    /**
-     * Renders every step to its own file rather than holding them in memory: a long run
-     * at a diagram's full size is far more pixels than a heap wants to carry at once.
-     *
-     * @return the canvas every frame will be laid on, or null if the export was cancelled
-     */
-    private static int[] renderFrames(List<String> sources, Path work, Progress progress)
-            throws IOException {
-        PlantUmlRenderer renderer = new PlantUmlRenderer();
+    /** Reads just the headers, so the canvas is known without decoding anything. */
+    private static int[] measure(List<Path> frames) throws IOException {
         int width = 0;
         int height = 0;
-
-        for (int i = 0; i < sources.size(); i++) {
-            if (progress.cancelled()) return null;
-            PlantUmlRenderer.PngRenderResult result = renderer.renderPng(sources.get(i));
-            if (result.isError()) {
-                throw new IOException("Step " + (i + 1) + " could not be drawn: " + result.errorText());
-            }
-            Path file = work.resolve(name(i));
-            Files.write(file, result.png());
-
-            int[] size = readSize(file);
+        for (Path frame : frames) {
+            int[] size = readSize(frame);
             width = Math.max(width, size[0]);
             height = Math.max(height, size[1]);
-            progress.rendered(i + 1, sources.size());
         }
         return new int[] { width, height };
     }
 
-    private static int writeFrames(int count, Path work, int[] canvas, Path directory,
+    private static int writeFrames(List<Path> frames, int[] canvas, Path directory,
                                    Options options, Progress progress) throws IOException {
         Files.createDirectories(directory);
         int written = 0;
-        for (int i = 0; i < count; i++) {
+        for (Path frame : frames) {
             if (progress.cancelled()) break;
-            BufferedImage frame = compose(work.resolve(name(i)), canvas, options.scale());
-            ImageIO.write(frame, "png", directory.resolve(name(i)).toFile());
+            BufferedImage image = compose(frame, canvas, options.scale());
+            ImageIO.write(image, "png", directory.resolve(name(written)).toFile());
             written++;
+            progress.rendered(written, frames.size());
         }
         if (written > 0) writeVideoNote(directory, options.secondsPerStep());
         return written;
@@ -153,7 +128,7 @@ public final class RunExporter {
         Files.writeString(directory.resolve("README.txt"), note);
     }
 
-    private static int writeGif(int count, Path work, int[] canvas, Path target,
+    private static int writeGif(List<Path> frames, int[] canvas, Path target,
                                 Options options, Progress progress) throws IOException {
         Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("gif");
         if (!writers.hasNext()) throw new IOException("No GIF encoder is available");
@@ -167,16 +142,17 @@ public final class RunExporter {
             writer.setOutput(stream);
             writer.prepareWriteSequence(null);
 
-            for (int i = 0; i < count; i++) {
+            for (int i = 0; i < frames.size(); i++) {
                 if (progress.cancelled()) break;
-                BufferedImage frame = compose(work.resolve(name(i)), canvas, options.scale());
+                BufferedImage frame = compose(frames.get(i), canvas, options.scale());
                 ImageWriteParam params = writer.getDefaultWriteParam();
                 IIOMetadata metadata = writer.getDefaultImageMetadata(
                         new ImageTypeSpecifier(frame), params);
-                int hold = i == count - 1 ? delay * END_HOLD_FACTOR : delay;
+                int hold = i == frames.size() - 1 ? delay * END_HOLD_FACTOR : delay;
                 writer.writeToSequence(
                         new IIOImage(frame, null, timed(metadata, hold, i == 0)), params);
                 written++;
+                progress.rendered(written, frames.size());
             }
             writer.endWriteSequence();
         } finally {
@@ -278,7 +254,8 @@ public final class RunExporter {
         return String.format("step-%04d.png", index + 1);
     }
 
-    private static void deleteTree(Path root) {
+    /** Clears a folder of recorded frames, which is nobody's to keep once the run is over. */
+    public static void deleteTree(Path root) {
         try (Stream<Path> walk = Files.walk(root)) {
             walk.sorted(Comparator.reverseOrder()).forEach(path -> {
                 try {

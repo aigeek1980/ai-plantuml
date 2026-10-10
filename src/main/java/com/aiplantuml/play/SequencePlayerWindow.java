@@ -6,6 +6,7 @@ import com.aiplantuml.ui.AppIcons;
 import javafx.animation.Animation;
 import javafx.application.Platform;
 import javafx.animation.KeyFrame;
+import javafx.animation.PauseTransition;
 import javafx.animation.Timeline;
 import javafx.concurrent.Worker;
 import javafx.geometry.Insets;
@@ -24,7 +25,11 @@ import javafx.scene.control.Label;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.Separator;
 import javafx.scene.control.Slider;
+import javafx.scene.control.Spinner;
+import javafx.scene.control.SpinnerValueFactory;
 import javafx.scene.control.Tooltip;
+import javafx.scene.image.Image;
+import javafx.scene.image.PixelFormat;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
@@ -39,6 +44,8 @@ import javafx.stage.Modality;
 import javafx.stage.Stage;
 import javafx.util.Duration;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
@@ -55,6 +62,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntConsumer;
 import java.util.stream.Collectors;
@@ -85,6 +94,12 @@ public class SequencePlayerWindow {
     /** Relative zoom change below which the view is left alone. */
     private static final double ZOOM_DEADBAND = 0.05;
 
+    /** GIF delays are hundredths of a second, and players race through anything shorter. */
+    private static final double MIN_GIF_DELAY_SECONDS = 0.05;
+    private static final double MAX_GIF_DELAY_SECONDS = 30.0;
+    /** How long a recorded step is given to finish painting before its picture is taken. */
+    private static final double CAPTURE_SETTLE_MS = 120;
+
     private final Stage stage = new Stage();
     private final WebView diagramView = new WebView();
     private final Label positionLabel = new Label();
@@ -108,13 +123,21 @@ public class SequencePlayerWindow {
 
     /** Draws only what runs, rebuilding the diagram each step, instead of revealing it. */
     private final CheckBox buildUpMode = new CheckBox("Build up only what runs");
+    private final CheckBox recordFrames = new CheckBox("Record frames");
     private final Button exportButton = new Button("Export...");
-    /**
-     * The first step that could actually be drawn. A run can open on a separator or a
-     * note, which PlantUML will not draw as a diagram at all, and those frames are no
-     * use in a film of the run.
-     */
-    private int firstDrawableStep = -1;
+
+    /** Pictures of the player, one per step, taken while recording was on. */
+    private final List<Path> recorded = new ArrayList<>();
+    private Path recordingFolder;
+    /** Frames are written off the UI thread, in order, so playing stays responsive. */
+    private final ExecutorService frameWriter =
+            Executors.newSingleThreadExecutor(task -> {
+                Thread thread = new Thread(task, "frame-writer");
+                thread.setDaemon(true);
+                return thread;
+            });
+    /** Set when a step has just been taken, so only steps forward are recorded. */
+    private boolean captureThisStep = false;
     private final ScriptModel script;
     private final String background;
     private TraceRun trace;
@@ -229,18 +252,23 @@ public class SequencePlayerWindow {
             }
         });
 
-        // Exporting means re-rendering the run frame by frame from its own sources,
-        // which only a build-up run has: a revealed one is CSS over a single drawing.
+        // An export is made of pictures of the player, so there has to be a run to take
+        // pictures of: recording is turned on first, and then the run is played.
+        recordFrames.setTooltip(new Tooltip(
+                "Keep a picture of the player at every step, ready to export as a GIF"));
+        recordFrames.selectedProperty().addListener((obs, was, now) -> updateExportButton());
+
         exportButton.setTooltip(new Tooltip(
-                "Save the run as an animated GIF, or as one image per step"));
-        exportButton.disableProperty().bind(buildUpMode.selectedProperty().not());
+                "Save the recorded steps as an animated GIF, or as one image each"));
         exportButton.setOnAction(e -> { pause(); exportRun(); });
+        updateExportButton();
 
         HBox controls = new HBox(8, resetButton, stepBackButton, playButton, stepForwardButton,
                 new Label("Speed:"), speedSlider,
                 new Separator(Orientation.VERTICAL),
                 zoomOutButton, zoomResetButton, zoomInButton, zoomLabel, autoFit,
-                new Separator(Orientation.VERTICAL), buildUpMode, exportButton,
+                new Separator(Orientation.VERTICAL), buildUpMode,
+                new Separator(Orientation.VERTICAL), recordFrames, exportButton,
                 spacer, endpointsLabel, followEditor, positionLabel);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8));
@@ -252,7 +280,11 @@ public class SequencePlayerWindow {
         root.setBottom(controls);
 
         stage.setScene(new Scene(root, 1100, 780));
-        stage.setOnHidden(e -> timeline.stop());
+        stage.setOnHidden(e -> {
+            timeline.stop();
+            frameWriter.shutdown();
+            if (recordingFolder != null) RunExporter.deleteTree(recordingFolder);
+        });
         setControlsEnabled(false);
         stage.show();
     }
@@ -335,8 +367,10 @@ public class SequencePlayerWindow {
 
     /** Rewinds to the previously executed step, giving up any branch it steps back out of. */
     private void stepBack() {
+        captureThisStep = false;
         if (buildUpMode.isSelected()) {
             if (traceSteps == 0) return;
+            dropLastFrame();
             // The trace is only ever appended to, so going back means running it again
             // from the start - cheap, since nothing is drawn until the end.
             traceSteps--;
@@ -354,6 +388,7 @@ public class SequencePlayerWindow {
         }
         List<Integer> played = new ArrayList<>(executed);
         if (played.isEmpty()) return;
+        dropLastFrame();
         played.remove(played.size() - 1);
         executed.clear();
         executed.addAll(played);
@@ -385,6 +420,8 @@ public class SequencePlayerWindow {
 
     /** Back to the untouched diagram, with every branch decision forgotten. */
     private void restart() {
+        captureThisStep = false;
+        clearRecording();
         executed.clear();
         decisions.clear();
         // Back to where the caret was, not to the top: that is where this run begins.
@@ -394,7 +431,6 @@ public class SequencePlayerWindow {
             answerAtStep.clear();
             answerCursor = 0;
             traceSteps = 0;
-            firstDrawableStep = -1;
             trace = new TraceRun(script, askingDecider());
             showTrace();
         } else {
@@ -492,51 +528,113 @@ public class SequencePlayerWindow {
     }
 
     /**
-     * Saves the run as it has been played. The frames are re-derived from the script
-     * rather than captured from the window, so the export does not depend on how the
-     * player happens to be scrolled, zoomed or sized.
+     * Takes a picture of the player as it stands, if this step is one to record.
+     * <p>
+     * The page paints on its own schedule, so the shot is taken a pulse after the step
+     * was drawn rather than in the same breath - otherwise the frame can be of the step
+     * before. Writing it out is handed off, so a long run does not stutter on encoding.
      */
-    private void exportRun() {
-        List<String> sources = playedSources();
-        if (sources.isEmpty()) {
-            info("Nothing to export yet",
-                    "Step or play through some of the run first - the export saves what has been drawn.");
+    private void captureFrame() {
+        if (!captureThisStep) return;
+        captureThisStep = false;
+        if (!recordFrames.isSelected()) return;
+
+        // Long enough for the page to have painted the step, short enough to keep up
+        // with the fastest the player can be stepped.
+        PauseTransition settle = new PauseTransition(Duration.millis(CAPTURE_SETTLE_MS));
+        settle.setOnFinished(e -> diagramView.snapshot(shot -> {
+            keepFrame(shot.getImage());
+            return null;
+        }, null, null));
+        settle.play();
+    }
+
+    private void keepFrame(Image image) {
+        int width = (int) Math.round(image.getWidth());
+        int height = (int) Math.round(image.getHeight());
+        if (width <= 0 || height <= 0) return;
+
+        // Pixels are read here, on the UI thread, because that is the only place the
+        // image belongs to us; everything after that is just bytes.
+        int[] pixels = new int[width * height];
+        image.getPixelReader().getPixels(0, 0, width, height,
+                PixelFormat.getIntArgbInstance(), pixels, 0, width);
+
+        Path file;
+        try {
+            file = recordingFolder().resolve(String.format("frame-%04d.png", recorded.size() + 1));
+        } catch (IOException e) {
+            recordFrames.setSelected(false);
+            showError("Recording stopped", "Nowhere to keep the frames: " + e.getMessage());
             return;
         }
-        RunExporter.Options options = askExportOptions(sources.size());
+        recorded.add(file);
+        updateExportButton();
+
+        frameWriter.execute(() -> {
+            BufferedImage buffer = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+            buffer.setRGB(0, 0, width, height, pixels, 0, width);
+            try {
+                ImageIO.write(buffer, "png", file.toFile());
+            } catch (IOException e) {
+                Platform.runLater(() -> {
+                    recorded.remove(file);
+                    updateExportButton();
+                });
+            }
+        });
+    }
+
+    private Path recordingFolder() throws IOException {
+        if (recordingFolder == null) {
+            recordingFolder = Files.createTempDirectory("aiplantuml-recording");
+        }
+        return recordingFolder;
+    }
+
+    /** Frames of steps that have been rewound past are no longer part of the run. */
+    private void dropLastFrame() {
+        if (recorded.isEmpty()) return;
+        Path file = recorded.remove(recorded.size() - 1);
+        frameWriter.execute(() -> {
+            try {
+                Files.deleteIfExists(file);
+            } catch (IOException ignored) {
+                // It will go with the folder when the window closes.
+            }
+        });
+        updateExportButton();
+    }
+
+    private void clearRecording() {
+        recorded.clear();
+        updateExportButton();
+        Path folder = recordingFolder;
+        if (folder == null) return;
+        recordingFolder = null;
+        frameWriter.execute(() -> RunExporter.deleteTree(folder));
+    }
+
+    private void updateExportButton() {
+        exportButton.setDisable(recorded.isEmpty());
+        exportButton.setText(recorded.isEmpty() ? "Export..." : "Export (" + recorded.size() + ")...");
+    }
+
+    /** Saves the frames recorded while the run was played. */
+    private void exportRun() {
+        List<Path> frames = List.copyOf(recorded);
+        if (frames.isEmpty()) {
+            info("Nothing recorded yet",
+                    "Tick \"Record frames\", then play or step through the run. Each step is"
+                            + " kept as it is drawn, and those are what gets exported.");
+            return;
+        }
+        RunExporter.Options options = askExportOptions(frames.size());
         if (options == null) return;
 
         Path target = chooseTarget(options.format());
         if (target == null) return;
-        startExport(sources, target, options);
-    }
-
-    /**
-     * The sources of each step played so far. The run is walked again from the start
-     * with the answers already given, which is both quicker than keeping every frame
-     * around and immune to having been rewound.
-     */
-    private List<String> playedSources() {
-        List<String> sources = new ArrayList<>();
-        if (firstDrawableStep < 0) return sources;
-
-        TraceRun replay = new TraceRun(script, new TraceRun.Decider() {
-            private int at = 0;
-
-            @Override
-            public int chooseBranch(ScriptModel.Block block) {
-                return at < answers.size() ? answers.get(at++) : 0;
-            }
-
-            @Override
-            public boolean repeatLoop(ScriptModel.Block block, int passesDone) {
-                return at < answers.size() && answers.get(at++) != 0;
-            }
-        });
-        for (int step = 1; step <= traceSteps && replay.step(); step++) {
-            if (step >= firstDrawableStep) sources.add(replay.currentSource());
-        }
-        return sources;
+        startExport(frames, target, options);
     }
 
     /** @return what to export, or null if the user backed out */
@@ -549,19 +647,29 @@ public class SequencePlayerWindow {
         scale.getItems().addAll("100%", "75%", "50%", "25%");
         scale.getSelectionModel().select(0);
 
+        // The playing speed is a reasonable guess at the right pace to watch it back,
+        // but only a guess: a GIF is read, not stepped through, and usually wants longer.
+        Spinner<Double> delay = new Spinner<>(new SpinnerValueFactory.DoubleSpinnerValueFactory(
+                MIN_GIF_DELAY_SECONDS, MAX_GIF_DELAY_SECONDS, speedSlider.getValue(), 0.1));
+        delay.setEditable(true);
+        delay.setPrefWidth(100);
+        HBox delayRow = new HBox(8, delay, new Label("seconds"));
+        delayRow.setAlignment(Pos.CENTER_LEFT);
+
         GridPane grid = new GridPane();
         grid.setHgap(10);
         grid.setVgap(10);
         grid.setPadding(new Insets(10, 10, 0, 10));
         grid.addRow(0, new Label("Save as:"), format);
         grid.addRow(1, new Label("Size:"), scale);
+        grid.addRow(2, new Label("Hold each step:"), delayRow);
 
-        Label note = new Label(frames + (frames == 1 ? " step" : " steps")
-                + " to draw. A large diagram takes a second or two per step, and a long"
-                + "\nrun makes a big file - the smaller sizes are there for sharing.");
+        Label note = new Label(frames + (frames == 1 ? " frame" : " frames")
+                + " recorded. The last one is held longer so the run does not snap back,"
+                + "\nand a long run makes a big file - the smaller sizes are there for sharing.");
         note.setStyle("-fx-text-fill: #6B7280;");
         GridPane.setColumnSpan(note, 2);
-        grid.add(note, 0, 2);
+        grid.add(note, 0, 3);
 
         Dialog<ButtonType> dialog = new Dialog<>();
         dialog.initOwner(stage);
@@ -570,6 +678,10 @@ public class SequencePlayerWindow {
         dialog.getDialogPane().setContent(grid);
         dialog.getDialogPane().getButtonTypes().addAll(ButtonType.OK, ButtonType.CANCEL);
         if (dialog.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return null;
+
+        // A spinner being edited by hand still holds its last committed value, so the
+        // text is what the user meant if they typed a figure and went straight to OK.
+        delay.increment(0);
 
         return new RunExporter.Options(
                 format.getSelectionModel().getSelectedIndex() == 0
@@ -580,7 +692,7 @@ public class SequencePlayerWindow {
                     case 3 -> 0.25;
                     default -> 1.0;
                 },
-                speedSlider.getValue());
+                delay.getValue());
     }
 
     private Path chooseTarget(RunExporter.Format format) {
@@ -622,15 +734,15 @@ public class SequencePlayerWindow {
         }
     }
 
-    /** Runs the export off the UI thread, since it is a render per step. */
-    private void startExport(List<String> sources, Path target, RunExporter.Options options) {
+    /** Runs the export off the UI thread: every frame is decoded, scaled and encoded. */
+    private void startExport(List<Path> frames, Path target, RunExporter.Options options) {
         Stage progressStage = new Stage();
         progressStage.initOwner(stage);
         progressStage.initModality(Modality.WINDOW_MODAL);
         progressStage.setTitle("Exporting");
         AppIcons.applyTo(progressStage);
 
-        Label message = new Label("Drawing step 1 of " + sources.size() + "...");
+        Label message = new Label("Writing frame 1 of " + frames.size() + "...");
         ProgressBar bar = new ProgressBar(0);
         bar.setPrefWidth(320);
         Button cancel = new Button("Cancel");
@@ -653,7 +765,7 @@ public class SequencePlayerWindow {
             public void rendered(int done, int total) {
                 Platform.runLater(() -> {
                     bar.setProgress((double) done / total);
-                    message.setText("Drawing step " + Math.min(done + 1, total) + " of " + total + "...");
+                    message.setText("Writing frame " + Math.min(done + 1, total) + " of " + total + "...");
                 });
             }
 
@@ -665,7 +777,7 @@ public class SequencePlayerWindow {
 
         Thread worker = new Thread(() -> {
             try {
-                RunExporter.Result result = RunExporter.export(sources, target, options, progress);
+                RunExporter.Result result = RunExporter.export(frames, target, options, progress);
                 Platform.runLater(() -> {
                     progressStage.close();
                     if (result.frames() == 0) return;             // cancelled; nothing to say
@@ -716,9 +828,11 @@ public class SequencePlayerWindow {
                 ? new PlantUmlRenderer().renderSvg(trace.currentSource())
                 : null;
         boolean drawable = result != null && !result.isError() && !result.svg().contains("Syntax Error");
-        if (drawable && firstDrawableStep < 0) firstDrawableStep = traceSteps;
 
         if (!drawable) {
+            // A step that draws nothing - an opening separator, say - is no use in a
+            // film of the run, so it is passed over rather than recorded as a blank.
+            captureThisStep = false;
             afterLoad = () -> { };
             diagramView.getEngine().loadContent(emptyTracePage(trace.stepsRun()));
             endpointsLabel.setText("");
@@ -744,6 +858,7 @@ public class SequencePlayerWindow {
             positionLabel.setText(traceSteps + " run");
             stepBackButton.setDisable(traceSteps == 0);
             stepForwardButton.setDisable(false);
+            captureFrame();
         };
         diagramView.getEngine().loadContent(wrap(result.svg(), background));
 
@@ -758,8 +873,12 @@ public class SequencePlayerWindow {
      * Returns false once the run is over.
      */
     private boolean advance() {
+        captureThisStep = true;
         if (buildUpMode.isSelected()) {
-            if (!trace.step()) return false;
+            if (!trace.step()) {
+                captureThisStep = false;
+                return false;
+            }
             traceSteps++;
             showTrace();
             return true;
@@ -774,7 +893,10 @@ public class SequencePlayerWindow {
             }
             if (undecided != null) {
                 Integer picked = askBranch(undecided.blockId());
-                if (picked == null) return false;           // cancelled - stay put
+                if (picked == null) {                       // cancelled - stay put
+                    captureThisStep = false;
+                    return false;
+                }
                 decisions.put(undecided.blockId(), picked);
                 continue;                                    // re-test with the choice applied
             }
@@ -790,10 +912,12 @@ public class SequencePlayerWindow {
                 current = candidate;
                 executed.add(candidate);
                 renderCurrent();
+                captureFrame();
                 return true;
             }
             candidate++;
         }
+        captureThisStep = false;
         return false;
     }
 
