@@ -10,7 +10,7 @@ import java.util.Set;
 /**
  * Walks a {@link ScriptModel} one statement at a time, building up the trace of what
  * actually ran. Branches not chosen are never emitted at all, so they take up no room
- * in the drawing, and a loop body is emitted once per iteration asked for.
+ * in the drawing, and a loop body is emitted again whenever the caller says to.
  * <p>
  * A par block runs its lanes together rather than one after the other: a step takes the
  * next statement from every lane at once, which is what parallel means. Because the
@@ -27,8 +27,15 @@ public final class TraceRun {
         /** @return index of the branch to follow, or -1 to stop the run */
         int chooseBranch(ScriptModel.Block block);
 
-        /** @return how many times to run the loop body, or -1 to stop the run */
-        int chooseIterations(ScriptModel.Block block);
+        /**
+         * Asked once a pass through a loop body has finished, which is where the
+         * question belongs: the body has just happened, and what is still open is
+         * whether it happens again.
+         *
+         * @param passesDone how many times the body has run so far
+         * @return true to run it once more
+         */
+        boolean repeatLoop(ScriptModel.Block block, int passesDone);
     }
 
     /** What has been emitted: plain lines, and par blocks holding a list per lane. */
@@ -45,8 +52,22 @@ public final class TraceRun {
     private sealed interface Frame permits Sequence, Parallel {
     }
 
-    private record Sequence(List<ScriptModel.Node> nodes, int index, int repeatsLeft,
-                            ScriptModel.Block loop, List<Out> out) implements Frame {
+    /**
+     * @param loop          the block this is a pass through, or null for a plain run of statements
+     * @param pass          which pass through the loop body this is, counting from one
+     * @param emittedAtPass how much had been drawn when the pass began, so a body that
+     *                      draws nothing at all is not offered round again forever
+     */
+    private record Sequence(List<ScriptModel.Node> nodes, int index, ScriptModel.Block loop,
+                            int pass, int emittedAtPass, List<Out> out) implements Frame {
+
+        static Sequence plain(List<ScriptModel.Node> nodes, List<Out> out) {
+            return new Sequence(nodes, 0, null, 0, 0, out);
+        }
+
+        Sequence atNext() {
+            return new Sequence(nodes, index + 1, loop, pass, emittedAtPass, out);
+        }
     }
 
     private record Parallel(List<Deque<Frame>> lanes, List<List<Out>> laneOut) implements Frame {
@@ -59,6 +80,7 @@ public final class TraceRun {
     private final Set<String> onStage = new LinkedHashSet<>();
     private final Deque<Frame> stack = new ArrayDeque<>();
     private int statements = 0;
+    private int emitted = 0;
     private int lastLine = -1;
 
     public TraceRun(ScriptModel script, Decider decider) {
@@ -72,8 +94,9 @@ public final class TraceRun {
         onStage.clear();
         stack.clear();
         statements = 0;
+        emitted = 0;
         lastLine = -1;
-        stack.push(new Sequence(script.body(), 0, 0, null, output));
+        stack.push(Sequence.plain(script.body(), output));
     }
 
     /**
@@ -110,20 +133,22 @@ public final class TraceRun {
             Sequence frame = (Sequence) frames.pop();
 
             if (frame.index() >= frame.nodes().size()) {
-                // A loop body that still owes iterations starts again rather than ending.
-                if (frame.loop() != null && frame.repeatsLeft() > 1) {
-                    frames.push(new Sequence(frame.nodes(), 0, frame.repeatsLeft() - 1,
-                            frame.loop(), frame.out()));
+                // The end of a loop body is where the question is put, and a body that
+                // drew nothing is not worth offering again however it is answered.
+                if (frame.loop() != null && emitted > frame.emittedAtPass()
+                        && decider.repeatLoop(frame.loop(), frame.pass())) {
+                    frames.push(new Sequence(frame.nodes(), 0, frame.loop(),
+                            frame.pass() + 1, emitted, frame.out()));
                 }
                 continue;
             }
 
             ScriptModel.Node node = frame.nodes().get(frame.index());
-            frames.push(new Sequence(frame.nodes(), frame.index() + 1, frame.repeatsLeft(),
-                    frame.loop(), frame.out()));
+            frames.push(frame.atNext());
 
             if (node instanceof ScriptModel.Line line) {
                 frame.out().add(new Emitted(line.text()));
+                emitted++;
                 return List.of(line);
             }
 
@@ -133,24 +158,22 @@ public final class TraceRun {
                     int branch = decider.chooseBranch(block);
                     if (branch < 0) return List.of();
                     if (branch < block.branches().size()) {
-                        frames.push(new Sequence(block.branches().get(branch).body(), 0, 0,
-                                null, frame.out()));
+                        frames.push(Sequence.plain(block.branches().get(branch).body(), frame.out()));
                     }
                 }
+                // A loop is entered without asking anything: the body runs, and only
+                // once it has finished is there any point asking whether to go round.
                 case "loop" -> {
-                    int times = decider.chooseIterations(block);
-                    if (times < 0) return List.of();
-                    if (times > 0 && !block.branches().isEmpty()) {
-                        frames.push(new Sequence(block.branches().get(0).body(), 0, times,
-                                block, frame.out()));
+                    if (!block.branches().isEmpty()) {
+                        frames.push(new Sequence(block.branches().get(0).body(), 0, block,
+                                1, emitted, frame.out()));
                     }
                 }
                 case "par" -> frames.push(startParallel(block, frame.out()));
                 // group and critical have nothing to decide: run what is inside.
                 default -> {
                     for (int b = block.branches().size() - 1; b >= 0; b--) {
-                        frames.push(new Sequence(block.branches().get(b).body(), 0, 0,
-                                null, frame.out()));
+                        frames.push(Sequence.plain(block.branches().get(b).body(), frame.out()));
                     }
                 }
             }
@@ -166,7 +189,7 @@ public final class TraceRun {
         for (ScriptModel.Branch branch : splitIntoLanes(block)) {
             List<Out> lineup = new ArrayList<>();
             Deque<Frame> lane = new ArrayDeque<>();
-            lane.push(new Sequence(branch.body(), 0, 0, null, lineup));
+            lane.push(Sequence.plain(branch.body(), lineup));
             labels.add(branch.label());
             laneOut.add(lineup);
             lanes.add(lane);

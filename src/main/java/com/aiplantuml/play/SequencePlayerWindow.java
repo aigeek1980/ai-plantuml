@@ -14,6 +14,7 @@ import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBar;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ChoiceDialog;
@@ -175,7 +176,8 @@ public class SequencePlayerWindow {
 
         buildUpMode.setTooltip(new Tooltip(
                 "Draw only the calls that run, as they run - unchosen branches never appear, "
-                        + "a loop repeats as many times as you say, and lifelines arrive when first used"));
+                        + "a loop asks at the end of each pass whether to go round again, "
+                        + "and lifelines arrive when first used"));
         buildUpMode.selectedProperty().addListener((obs, was, now) -> { pause(); restart(); });
 
         HBox controls = new HBox(8, resetButton, stepBackButton, playButton, stepForwardButton,
@@ -342,13 +344,16 @@ public class SequencePlayerWindow {
             }
 
             @Override
-            public int chooseIterations(ScriptModel.Block block) {
+            public boolean repeatLoop(ScriptModel.Block block, int passesDone) {
                 Integer replayed = nextRecordedAnswer();
-                if (replayed != null) return replayed;
-                List<String> options = List.of("1", "2", "3", "5", "10");
-                Integer picked = ask("How many times?",
-                        "Loop: " + block.branches().get(0).label() + "\nHow many iterations should run?", options);
-                return picked == null ? -1 : record(Integer.parseInt(options.get(picked)));
+                if (replayed != null) return replayed != 0;
+                String label = block.branches().get(0).label();
+                String name = ScriptModel.UNLABELLED.equals(label) ? "this loop" : "\"" + label + "\"";
+                boolean again = confirm("One more time?", "Repeat " + name + "?",
+                        passesDone == 1
+                                ? "It has run once. Go round again?"
+                                : "It has run " + passesDone + " times. Go round again?");
+                return record(again ? 1 : 0) != 0;
             }
         };
     }
@@ -384,6 +389,30 @@ public class SequencePlayerWindow {
             playButton.setText("⏸  Pause");
         }
         return options.indexOf(answer.get());
+    }
+
+    /**
+     * A yes-or-no question. Closing it without answering means carrying on rather than
+     * repeating, since a question about going round again is only ever opening up more
+     * work - declining it is the safe reading.
+     */
+    private boolean confirm(String title, String header, String detail) {
+        boolean wasRunning = timeline.getStatus() == Animation.Status.RUNNING;
+        pause();
+
+        ButtonType again = new ButtonType("Repeat", ButtonBar.ButtonData.YES);
+        ButtonType carryOn = new ButtonType("Carry on", ButtonBar.ButtonData.NO);
+        Alert dialog = new Alert(Alert.AlertType.CONFIRMATION, detail, again, carryOn);
+        dialog.initOwner(stage);
+        dialog.setTitle(title);
+        dialog.setHeaderText(header);
+        boolean yes = dialog.showAndWait().orElse(carryOn) == again;
+
+        if (wasRunning) {
+            startTimeline();
+            playButton.setText("⏸  Pause");
+        }
+        return yes;
     }
 
     /** Renders the trace as it now stands and shows it. */
