@@ -16,14 +16,19 @@
     var MAX_ARROW_HEIGHT = 48;
     // Slack when deciding whether an arrow end lands on a participant's column.
     var COLUMN_SLACK = 14;
+    // Slack past the outermost lifelines before an element is too wide to be an arrow.
+    var ARROW_WIDTH_SLACK = 24;
     // Smallest box treated as an alt/group frame rather than diagram furniture.
     var MIN_FRAME_HEIGHT = 56;
     var MIN_FRAME_WIDTH = 120;
     // A box nearly as tall as the diagram is a participant grouping or the background,
     // which belong to the diagram's structure and are always shown.
     var FULL_HEIGHT_RATIO = 0.9;
-    // Band below a frame's top edge holding its "alt" tab and first condition.
+    // Band below a frame top edge holding its "alt" tab and first condition.
     var FRAME_HEADER_BAND = 26;
+    // How far right of a frame edge its tab shape, and then its condition text, may sit.
+    var FRAME_TAB_REACH = 140;
+    var FRAME_LABEL_REACH = 520;
     var PAN_THRESHOLD = 4;
 
     var steps = [];
@@ -56,13 +61,34 @@
 
         // Frames first, so they can claim their own header text before the messages
         // sweep up whatever loose text sits in their row.
-        var claimed = [];
         var boxes = document.querySelectorAll('rect, path, polyline');
         for (var b = 0; b < boxes.length; b++) {
             var br = docRect(boxes[b]);
             if (br.height < MIN_FRAME_HEIGHT || br.width < MIN_FRAME_WIDTH) continue;
             if (br.height > diagramHeight * FULL_HEIGHT_RATIO) continue;
-            frames.push({ el: boxes[b], top: br.top, bottom: br.bottom, texts: [] });
+            frames.push({ el: boxes[b], left: br.left, top: br.top, bottom: br.bottom, texts: [] });
+        }
+
+        // The "alt" tab is a small shape in the frame's top-left corner. Left unclaimed,
+        // the message above it takes it for part of its own arrow, and since the tab sits
+        // at the far left the message then looks as though it reached that far across.
+        function frameHeaderOwner(r, reach) {
+            for (var f = 0; f < frames.length; f++) {
+                if (r.top < frames[f].top - 2 || r.top > frames[f].top + FRAME_HEADER_BAND) continue;
+                if (r.left > frames[f].left + reach) continue;
+                return frames[f];
+            }
+            return null;
+        }
+
+        for (var b = 0; b < boxes.length; b++) {
+            var sr = docRect(boxes[b]);
+            if (sr.height >= MIN_FRAME_HEIGHT) continue;
+            var tabOwner = frameHeaderOwner(sr, FRAME_TAB_REACH);
+            if (tabOwner) {
+                tabOwner.texts.push(boxes[b]);
+                boxes[b].__frameOwned = true;
+            }
         }
 
         var geometry = [];
@@ -77,14 +103,8 @@
             if (texts[t].closest('a')) continue;
             var tr = docRect(texts[t]);
             if (!tr.width && !tr.height) continue;
-            var owner = null;
-            for (var f = 0; f < frames.length; f++) {
-                if (tr.top >= frames[f].top - 2 && tr.top <= frames[f].top + FRAME_HEADER_BAND) {
-                    owner = frames[f];
-                    break;
-                }
-            }
-            if (owner) { owner.texts.push(texts[t]); claimed.push(texts[t]); }
+            var owner = frameHeaderOwner(tr, FRAME_LABEL_REACH);
+            if (owner) { owner.texts.push(texts[t]); texts[t].__frameOwned = true; }
             else { looseText.push({ el: texts[t], y: tr.top + tr.height / 2 }); }
         }
 
@@ -128,6 +148,22 @@
         }
         messageOrder.sort(function (p, q) { return p.mid - q.mid; });
 
+        // An arrow runs between two lifelines, so it cannot be wider than the outermost
+        // pair. Frame borders and "== separator ==" rules are thin enough to pass for
+        // arrows but stretch past that, and counting them made a message look as though
+        // it spanned the whole diagram - which threw off both its participants and the
+        // zoom needed to fit it.
+        var minCentre = Infinity, maxCentre = -Infinity;
+        for (var p = 0; p < participants.length; p++) {
+            for (var b = 0; b < participants[p].boxes.length; b++) {
+                var centre = (participants[p].boxes[b].left + participants[p].boxes[b].right) / 2;
+                minCentre = Math.min(minCentre, centre);
+                maxCentre = Math.max(maxCentre, centre);
+            }
+        }
+        var maxArrowWidth = maxCentre > minCentre
+            ? (maxCentre - minCentre) + ARROW_WIDTH_SLACK : Infinity;
+
         for (var s = 0; s < messageOrder.length; s++) {
             var step = messageOrder[s];
 
@@ -144,6 +180,8 @@
                 var gr = geometry[g].r;
                 if (!gr.width && !gr.height) continue;
                 if (gr.height > MAX_ARROW_HEIGHT) continue;
+                if (gr.width > maxArrowWidth) continue;
+                if (geometry[g].el.__frameOwned) continue;
                 var gy = gr.top + gr.height / 2;
                 if (gy < step.top || gy >= limit) continue;
                 step.parts.push(geometry[g].el);
