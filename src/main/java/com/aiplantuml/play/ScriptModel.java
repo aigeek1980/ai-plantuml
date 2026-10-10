@@ -39,7 +39,12 @@ public final class ScriptModel {
     public record Group(String boxHeader, String boxEnd, List<Member> members) {
     }
 
-    public record Member(String alias, String declaration) {
+    /**
+     * @param alias       the short name statements refer to it by
+     * @param display     the name it is drawn with, which is what a reader recognises
+     * @param declaration the original line, re-emitted untouched
+     */
+    public record Member(String alias, String display, String declaration) {
     }
 
     private static final Set<String> CHOICE_KINDS = Set.of("alt", "opt");
@@ -150,12 +155,14 @@ public final class ScriptModel {
 
             Matcher decl = DECLARATION.matcher(trimmed);
             if (decl.find()) {
-                String alias = decl.group(4) != null ? decl.group(4) : stripQuotes(decl.group(2));
+                String display = stripQuotes(decl.group(2));
+                String alias = decl.group(4) != null ? decl.group(4) : display;
                 aliases.add(alias);
+                Member member = new Member(alias, display, raw);
                 if (openBox != null) {
-                    openBox.members().add(new Member(alias, raw));
+                    openBox.members().add(member);
                 } else {
-                    groups.add(new Group(null, null, new ArrayList<>(List.of(new Member(alias, raw)))));
+                    groups.add(new Group(null, null, new ArrayList<>(List.of(member))));
                 }
                 continue;
             }
@@ -262,6 +269,16 @@ public final class ScriptModel {
 
     public List<Node> body() {
         return body;
+    }
+
+    /** The name a participant is drawn with, for naming things after it in the open. */
+    public String displayNameOf(String alias) {
+        for (Group group : groups) {
+            for (Member member : group.members()) {
+                if (member.alias().equals(alias)) return member.display();
+            }
+        }
+        return alias;
     }
 
     /** Renders a trace: the setup, the participants reached so far, then the statements run. */

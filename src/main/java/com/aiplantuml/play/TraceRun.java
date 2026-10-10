@@ -205,13 +205,24 @@ public final class TraceRun {
         List<ScriptModel.Branch> lanes = new ArrayList<>();
         for (var entry : byLifeline.entrySet()) {
             // The block's own label belongs to the first lane; the rest are named after
-            // the lifeline doing the work, which is more use than nothing.
+            // the lifeline doing the work - under the name it is drawn with, since the
+            // alias is an internal handle the reader never sees anywhere else.
             String label = lanes.isEmpty() && !ScriptModel.UNLABELLED.equals(blockLabel)
                     ? blockLabel
-                    : (entry.getKey().isBlank() ? ScriptModel.UNLABELLED : entry.getKey());
+                    : lifelineNames(entry.getKey());
             lanes.add(new ScriptModel.Branch(label, entry.getValue()));
         }
         return lanes;
+    }
+
+    private String lifelineNames(String aliasKey) {
+        if (aliasKey.isBlank()) return ScriptModel.UNLABELLED;
+        List<String> names = new ArrayList<>();
+        for (String alias : aliasKey.split(",")) {
+            String name = script.displayNameOf(alias);
+            if (!names.contains(name)) names.add(name);
+        }
+        return String.join(", ", names);
     }
 
     public String currentSource() {
