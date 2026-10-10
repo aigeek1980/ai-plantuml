@@ -262,7 +262,7 @@ public final class ScriptModel {
     }
 
     /** Renders a trace: the setup, the participants reached so far, then the statements run. */
-    public String toSource(List<String> emitted, Set<String> aliasesOnStage) {
+    public String toSource(String body, Set<String> aliasesOnStage) {
         StringBuilder out = new StringBuilder("@startuml\n");
         for (String line : setup) out.append(line).append('\n');
 
@@ -276,7 +276,7 @@ public final class ScriptModel {
             if (group.boxEnd() != null) out.append(group.boxEnd()).append('\n');
         }
 
-        for (String line : emitted) out.append(line).append('\n');
+        out.append(body);
         out.append("@enduml\n");
         return out.toString();
     }

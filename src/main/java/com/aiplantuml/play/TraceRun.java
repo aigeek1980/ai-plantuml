@@ -12,6 +12,11 @@ import java.util.Set;
  * actually ran. Branches not chosen are never emitted at all, so they take up no room
  * in the drawing, and a loop body is emitted once per iteration asked for.
  * <p>
+ * A par block runs its lanes together rather than one after the other: a step takes the
+ * next statement from every lane at once, which is what parallel means. Because the
+ * lanes interleave, the trace is kept as a tree rather than a list of lines - each
+ * lane's statements have to come out grouped under their own branch of the par.
+ * <p>
  * Choices are not decided here: the caller is asked, so it can put the question to the
  * user and keep the walk going afterwards.
  */
@@ -26,17 +31,35 @@ public final class TraceRun {
         int chooseIterations(ScriptModel.Block block);
     }
 
-    /** One position in the walk: a list of statements and how far through it we are. */
-    private record Frame(List<ScriptModel.Node> nodes, int index, int repeatsLeft, ScriptModel.Block loop) {
+    /** What has been emitted: plain lines, and par blocks holding a list per lane. */
+    private sealed interface Out permits Emitted, ParallelOut {
+    }
+
+    private record Emitted(String line) implements Out {
+    }
+
+    private record ParallelOut(List<String> labels, List<List<Out>> lanes) implements Out {
+    }
+
+    /** A position in the walk: either a list of statements, or lanes running together. */
+    private sealed interface Frame permits Sequence, Parallel {
+    }
+
+    private record Sequence(List<ScriptModel.Node> nodes, int index, int repeatsLeft,
+                            ScriptModel.Block loop, List<Out> out) implements Frame {
+    }
+
+    private record Parallel(List<Deque<Frame>> lanes, List<List<Out>> laneOut) implements Frame {
     }
 
     private final ScriptModel script;
     private final Decider decider;
 
-    private final List<String> emitted = new ArrayList<>();
+    private final List<Out> output = new ArrayList<>();
     private final Set<String> onStage = new LinkedHashSet<>();
     private final Deque<Frame> stack = new ArrayDeque<>();
-    private ScriptModel.Line lastStatement;
+    private int statements = 0;
+    private int lastLine = -1;
 
     public TraceRun(ScriptModel script, Decider decider) {
         this.script = script;
@@ -45,83 +68,152 @@ public final class TraceRun {
     }
 
     public void reset() {
-        emitted.clear();
+        output.clear();
         onStage.clear();
         stack.clear();
-        lastStatement = null;
-        stack.push(new Frame(script.body(), 0, 0, null));
+        statements = 0;
+        lastLine = -1;
+        stack.push(new Sequence(script.body(), 0, 0, null, output));
     }
 
     /**
-     * Runs statements until one is drawn, which may mean passing through the end of a
-     * block or asking a question on the way.
+     * Runs until something is drawn, which for a par means one statement from each lane.
      *
      * @return false when the run is over or the user declined a choice
      */
     public boolean step() {
-        while (!stack.isEmpty()) {
-            Frame frame = stack.pop();
+        List<ScriptModel.Line> drawn = advance(stack);
+        if (drawn.isEmpty()) return false;
+        for (ScriptModel.Line line : drawn) {
+            onStage.addAll(line.aliases());
+            statements++;
+        }
+        lastLine = drawn.get(0).sourceLine();
+        return true;
+    }
+
+    /** @return the statements this step drew, empty when the stack is spent */
+    private List<ScriptModel.Line> advance(Deque<Frame> frames) {
+        while (!frames.isEmpty()) {
+            Frame top = frames.peek();
+
+            if (top instanceof Parallel parallel) {
+                List<ScriptModel.Line> round = new ArrayList<>();
+                for (Deque<Frame> lane : parallel.lanes()) {
+                    round.addAll(advance(lane));
+                }
+                if (!round.isEmpty()) return round;
+                frames.pop();                      // every lane has finished
+                continue;
+            }
+
+            Sequence frame = (Sequence) frames.pop();
 
             if (frame.index() >= frame.nodes().size()) {
                 // A loop body that still owes iterations starts again rather than ending.
                 if (frame.loop() != null && frame.repeatsLeft() > 1) {
-                    stack.push(new Frame(frame.nodes(), 0, frame.repeatsLeft() - 1, frame.loop()));
-                    continue;
+                    frames.push(new Sequence(frame.nodes(), 0, frame.repeatsLeft() - 1,
+                            frame.loop(), frame.out()));
                 }
                 continue;
             }
 
             ScriptModel.Node node = frame.nodes().get(frame.index());
-            stack.push(new Frame(frame.nodes(), frame.index() + 1, frame.repeatsLeft(), frame.loop()));
+            frames.push(new Sequence(frame.nodes(), frame.index() + 1, frame.repeatsLeft(),
+                    frame.loop(), frame.out()));
 
             if (node instanceof ScriptModel.Line line) {
-                emitted.add(line.text());
-                onStage.addAll(line.aliases());
-                lastStatement = line;
-                return true;
+                frame.out().add(new Emitted(line.text()));
+                return List.of(line);
             }
 
             ScriptModel.Block block = (ScriptModel.Block) node;
             switch (block.kind()) {
                 case "alt", "opt" -> {
                     int branch = decider.chooseBranch(block);
-                    if (branch < 0) { stack.push(frame); return false; }
+                    if (branch < 0) return List.of();
                     if (branch < block.branches().size()) {
-                        stack.push(new Frame(block.branches().get(branch).body(), 0, 0, null));
+                        frames.push(new Sequence(block.branches().get(branch).body(), 0, 0,
+                                null, frame.out()));
                     }
                 }
                 case "loop" -> {
                     int times = decider.chooseIterations(block);
-                    if (times < 0) { stack.push(frame); return false; }
+                    if (times < 0) return List.of();
                     if (times > 0 && !block.branches().isEmpty()) {
-                        stack.push(new Frame(block.branches().get(0).body(), 0, times, block));
+                        frames.push(new Sequence(block.branches().get(0).body(), 0, times,
+                                block, frame.out()));
                     }
                 }
-                // par, group and critical have nothing to decide: run what is inside.
+                case "par" -> frames.push(startParallel(block, frame.out()));
+                // group and critical have nothing to decide: run what is inside.
                 default -> {
                     for (int b = block.branches().size() - 1; b >= 0; b--) {
-                        stack.push(new Frame(block.branches().get(b).body(), 0, 0, null));
+                        frames.push(new Sequence(block.branches().get(b).body(), 0, 0,
+                                null, frame.out()));
                     }
                 }
             }
         }
-        return false;
+        return List.of();
+    }
+
+    private Parallel startParallel(ScriptModel.Block block, List<Out> out) {
+        List<String> labels = new ArrayList<>();
+        List<List<Out>> laneOut = new ArrayList<>();
+        List<Deque<Frame>> lanes = new ArrayList<>();
+
+        for (ScriptModel.Branch branch : block.branches()) {
+            List<Out> lineup = new ArrayList<>();
+            Deque<Frame> lane = new ArrayDeque<>();
+            lane.push(new Sequence(branch.body(), 0, 0, null, lineup));
+            labels.add(branch.label());
+            laneOut.add(lineup);
+            lanes.add(lane);
+        }
+
+        out.add(new ParallelOut(labels, laneOut));
+        return new Parallel(lanes, laneOut);
     }
 
     public String currentSource() {
-        return script.toSource(emitted, onStage);
+        StringBuilder body = new StringBuilder();
+        write(output, body);
+        return script.toSource(body.toString(), onStage);
+    }
+
+    private void write(List<Out> nodes, StringBuilder body) {
+        for (Out node : nodes) {
+            if (node instanceof Emitted emitted) {
+                body.append(emitted.line()).append('\n');
+                continue;
+            }
+            ParallelOut parallel = (ParallelOut) node;
+            // The frame is only drawn once a lane has something in it, so a par that has
+            // been reached but not yet run does not show as an empty box.
+            if (parallel.lanes().stream().allMatch(List::isEmpty)) continue;
+
+            boolean first = true;
+            for (int lane = 0; lane < parallel.lanes().size(); lane++) {
+                if (parallel.lanes().get(lane).isEmpty()) continue;
+                body.append(first ? "par " : "else ").append(parallel.labels().get(lane)).append('\n');
+                write(parallel.lanes().get(lane), body);
+                first = false;
+            }
+            body.append("end\n");
+        }
     }
 
     public int stepsRun() {
-        return emitted.size();
+        return statements;
     }
 
-    /** Source line of the statement just drawn, for following along in the editor. */
+    /** Source line of a statement just drawn, for following along in the editor. */
     public int lastSourceLine() {
-        return lastStatement == null ? -1 : lastStatement.sourceLine();
+        return lastLine;
     }
 
     public boolean hasRunAnything() {
-        return !emitted.isEmpty();
+        return statements > 0;
     }
 }
