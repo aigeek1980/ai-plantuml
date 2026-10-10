@@ -338,8 +338,11 @@ public class MainView extends BorderPane {
         renderItem.setOnAction(e -> renderNow());
 
         MenuItem playItem = new MenuItem("Play Diagram...");
+        // The run starts where the caret is, so a long diagram can be picked up at the
+        // part being worked on rather than always from the top.
         playItem.setOnAction(e -> new SequencePlayerWindow(
-                stage, editor.getText(), appConfig.getDiagramBackground(), this::moveCaretToLine));
+                stage, editor.getText(), editor.getCurrentParagraph(),
+                appConfig.getDiagramBackground(), this::moveCaretToLine));
 
         Menu diagramMenu = new Menu("Diagram", null, renderItem, new SeparatorMenuItem(), playItem);
 

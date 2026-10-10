@@ -118,16 +118,30 @@ public class SequencePlayerWindow {
     private int stepCount = 0;
     private int current = -1;
 
+    /** Whether starting at the caret actually leaves anything out, worth saying in the title. */
+    private final boolean skipsStart;
+    /** Kept so the whole diagram can be put back when build-up mode is turned off. */
+    private String originalSvg = "";
+    /** First step at or after the caret; the ones before it are never played. */
+    private int firstStep = 0;
+    /** The opening load builds the step list even when the run itself is a build-up. */
+    private boolean built = false;
+
     /**
      * @param owner          window to sit above; the player is non-modal so the editor stays usable
      * @param source         snapshot of the diagram to play
+     * @param startLine      0-based line the caret was on, where the run begins
      * @param background     diagram pane background, so the player matches the editor's look
      * @param onStepLine     called with the 0-based source line of each step, for editor follow
      */
-    public SequencePlayerWindow(Stage owner, String source, String background, IntConsumer onStepLine) {
+    public SequencePlayerWindow(Stage owner, String source, int startLine, String background,
+                                IntConsumer onStepLine) {
         this.onStepLine = onStepLine;
         this.blocks = BlockModel.parse(source);
-        this.script = ScriptModel.parse(source);
+
+        ScriptModel whole = ScriptModel.parse(source);
+        this.script = whole.startingAt(Math.max(0, startLine));
+        this.skipsStart = script.firstSourceLine() > whole.firstSourceLine();
         this.background = background;
 
         PlantUmlRenderer.SvgRenderResult result = new PlantUmlRenderer().renderSvg(source);
@@ -137,14 +151,19 @@ public class SequencePlayerWindow {
             return;
         }
         this.nodeLineNumbers = result.nodeLineNumbers();
+        this.originalSvg = result.svg();
 
-        buildUi(owner, background);
-        loadDiagram(result.svg(), background);
+        buildUi(owner);
+        installLoadHandler();
+        afterLoad = this::onDiagramPageReady;
+        diagramView.getEngine().loadContent(wrap(originalSvg, background));
     }
 
-    private void buildUi(Stage owner, String background) {
+    private void buildUi(Stage owner) {
         stage.initOwner(owner);
-        stage.setTitle("Play diagram");
+        stage.setTitle(skipsStart
+                ? "Play diagram - from line " + (script.firstSourceLine() + 1)
+                : "Play diagram");
         AppIcons.applyTo(stage);
 
         resetButton.setOnAction(e -> { pause(); restart(); });
@@ -178,7 +197,18 @@ public class SequencePlayerWindow {
                 "Draw only the calls that run, as they run - unchosen branches never appear, "
                         + "a loop asks at the end of each pass whether to go round again, "
                         + "and lifelines arrive when first used"));
-        buildUpMode.selectedProperty().addListener((obs, was, now) -> { pause(); restart(); });
+        buildUpMode.setSelected(true);
+        buildUpMode.selectedProperty().addListener((obs, was, now) -> {
+            pause();
+            if (now) {
+                restart();
+            } else {
+                // The trace page is what is on screen, so the whole diagram has to be
+                // put back before it can be revealed a step at a time again.
+                afterLoad = this::onDiagramPageReady;
+                diagramView.getEngine().loadContent(wrap(originalSvg, background));
+            }
+        });
 
         HBox controls = new HBox(8, resetButton, stepBackButton, playButton, stepForwardButton,
                 new Label("Speed:"), speedSlider,
@@ -201,28 +231,31 @@ public class SequencePlayerWindow {
         stage.show();
     }
 
-    private void loadDiagram(String svg, String background) {
-        WebEngine engine = diagramView.getEngine();
-        engine.getLoadWorker().stateProperty().addListener((obs, old, state) -> {
+    /**
+     * Every page this window loads hands over to whatever asked for it: build-up mode
+     * reloads on each step, and the whole diagram is reloaded when it is switched off.
+     */
+    private void installLoadHandler() {
+        diagramView.getEngine().getLoadWorker().stateProperty().addListener((obs, old, state) -> {
             if (state != Worker.State.SUCCEEDED) return;
-            // Build-up mode reloads the page on every step, so each load hands over to
-            // whatever that step asked for rather than starting the run again.
-            if (buildUpMode.isSelected()) {
-                Runnable pending = afterLoad;
-                afterLoad = () -> { };
-                pending.run();
-                return;
-            }
-            Object count = engine.executeScript("window.player.build()");
-            stepCount = count instanceof Number n ? n.intValue() : 0;
-            resolveStepLines(engine);
-            setControlsEnabled(stepCount > 0);
-            restart();
-            if (stepCount == 0) {
-                positionLabel.setText("No messages to play");
-            }
+            Runnable pending = afterLoad;
+            afterLoad = () -> { };
+            pending.run();
         });
-        engine.loadContent(wrap(svg, background));
+    }
+
+    /** The whole diagram is on screen: index its steps and start the run over. */
+    private void onDiagramPageReady() {
+        WebEngine engine = diagramView.getEngine();
+        Object count = engine.executeScript("window.player.build()");
+        stepCount = count instanceof Number n ? n.intValue() : 0;
+        resolveStepLines(engine);
+        if (!built) {
+            built = true;
+            setControlsEnabled(stepCount > 0);
+            if (stepCount == 0) positionLabel.setText("No messages to play");
+        }
+        restart();
     }
 
     /** Each step's source line, so its place in the alt/else structure is known up front. */
@@ -234,6 +267,21 @@ public class SequencePlayerWindow {
         for (int i = 0; i < stepCount; i++) {
             stepLines[i] = i < hrefs.length ? lineFor(hrefs[i]).orElse(-1) : -1;
         }
+        firstStep = firstStepAtOrAfterCaret();
+    }
+
+    /**
+     * Where a revealed run begins. The anchor is the first statement the script itself
+     * will run, so both modes start at the same place even though one works from the
+     * source and the other from what was drawn.
+     */
+    private int firstStepAtOrAfterCaret() {
+        int anchor = script.firstSourceLine();
+        if (anchor <= 0) return 0;
+        int step = 0;
+        while (step < stepCount && (stepLines[step] < 0 || stepLines[step] < anchor)) step++;
+        // Nothing recognisable at or after the caret: better to play it all than nothing.
+        return step >= stepCount ? 0 : step;
     }
 
     private void togglePlay() {
@@ -283,7 +331,7 @@ public class SequencePlayerWindow {
         played.remove(played.size() - 1);
         executed.clear();
         executed.addAll(played);
-        current = played.isEmpty() ? -1 : played.get(played.size() - 1);
+        current = played.isEmpty() ? firstStep - 1 : played.get(played.size() - 1);
         forgetUnenteredDecisions();
         renderCurrent();
     }
@@ -313,7 +361,8 @@ public class SequencePlayerWindow {
     private void restart() {
         executed.clear();
         decisions.clear();
-        current = -1;
+        // Back to where the caret was, not to the top: that is where this run begins.
+        current = firstStep - 1;
         if (buildUpMode.isSelected()) {
             answers.clear();
             answerAtStep.clear();
@@ -619,8 +668,9 @@ public class SequencePlayerWindow {
 
     private void updatePosition() {
         // Counts what has run rather than how far down the diagram we are: with branching,
-        // the steps skipped in paths not taken never happen, so the total is only a ceiling.
-        positionLabel.setText(stepCount == 0 ? "" : executed.size() + " / " + stepCount);
+        // the steps skipped in paths not taken never happen, so the total is only a ceiling -
+        // and the ones above the caret are not part of this run at all.
+        positionLabel.setText(stepCount == 0 ? "" : executed.size() + " / " + (stepCount - firstStep));
         stepBackButton.setDisable(executed.isEmpty());
         stepForwardButton.setDisable(current >= stepCount - 1);
     }

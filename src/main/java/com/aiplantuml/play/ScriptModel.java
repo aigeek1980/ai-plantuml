@@ -67,6 +67,13 @@ public final class ScriptModel {
     private ScriptModel() {
     }
 
+    /** Same cast and setup, a different run through it. */
+    private ScriptModel(ScriptModel original, List<Node> newBody) {
+        setup.addAll(original.setup);
+        groups.addAll(original.groups);
+        body.addAll(newBody);
+    }
+
     public static ScriptModel parse(String source) {
         ScriptModel model = new ScriptModel();
         model.scan(source.split("\n", -1));
@@ -269,6 +276,71 @@ public final class ScriptModel {
 
     public List<Node> body() {
         return body;
+    }
+
+    /**
+     * The same script read as though it began at the given line: everything before it
+     * is dropped, and the participants it would have introduced simply arrive later,
+     * when they are first used.
+     * <p>
+     * A block the line falls inside is kept, but only the branch the line is in, and it
+     * stops being a decision: there is nothing to ask about a choice already half made,
+     * and no full pass of a loop left to repeat. Blocks reached later are untouched, so
+     * they are still asked about in the ordinary way.
+     */
+    public ScriptModel startingAt(int line) {
+        if (line <= 0) return this;
+        return new ScriptModel(this, prune(body, line));
+    }
+
+    private static List<Node> prune(List<Node> nodes, int line) {
+        for (int i = 0; i < nodes.size(); i++) {
+            Node node = nodes.get(i);
+            if (lastLineOf(node) < line) continue;              // wholly behind us
+
+            List<Node> kept = new ArrayList<>();
+            if (node instanceof Block block && block.sourceLine() < line) {
+                for (Branch branch : block.branches()) {
+                    List<Node> inner = prune(branch.body(), line);
+                    if (inner.isEmpty()) continue;
+                    kept.add(new Block("group", List.of(new Branch(branch.label(), inner)),
+                            block.sourceLine()));
+                    break;
+                }
+            } else {
+                kept.add(node);
+            }
+            kept.addAll(nodes.subList(i + 1, nodes.size()));
+            return kept;
+        }
+        return List.of();
+    }
+
+    /** Source line of the first statement that will run, or -1 if there is none. */
+    public int firstSourceLine() {
+        return firstLineOf(body);
+    }
+
+    private static int firstLineOf(List<Node> nodes) {
+        for (Node node : nodes) {
+            if (node instanceof Line line) return line.sourceLine();
+            for (Branch branch : ((Block) node).branches()) {
+                int found = firstLineOf(branch.body());
+                if (found >= 0) return found;
+            }
+        }
+        return -1;
+    }
+
+    /** How far down the source a statement, or everything inside a block, reaches. */
+    private static int lastLineOf(Node node) {
+        if (node instanceof Line line) return line.sourceLine();
+        Block block = (Block) node;
+        int last = block.sourceLine();
+        for (Branch branch : block.branches()) {
+            for (Node child : branch.body()) last = Math.max(last, lastLineOf(child));
+        }
+        return last;
     }
 
     /** The name a participant is drawn with, for naming things after it in the open. */
