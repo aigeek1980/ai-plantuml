@@ -12,14 +12,10 @@
 
     var LINK = 'node://';
     var SEP = '\u0001';
-    // How far from a label's band an element may sit and still belong to it.
-    var BAND = 24;
     // Anything this tall is a lifeline or activation bar spanning the diagram, not an arrow.
     var MAX_ARROW_HEIGHT = 48;
     // Slack when deciding whether an arrow end lands on a participant's column.
     var COLUMN_SLACK = 14;
-    // Elements this close together vertically belong to the same arrow row.
-    var ROW_TOLERANCE = 6;
     var PAN_THRESHOLD = 4;
 
     var steps = [];
@@ -84,43 +80,50 @@
         }
         messageOrder.sort(function (p, q) { return p.mid - q.mid; });
 
+        // Autonumber digits are drawn as their own text, outside the message's link, so
+        // they have to be claimed by position or they linger after the step is hidden.
+        var looseText = [];
+        var texts = document.querySelectorAll('text');
+        for (var t = 0; t < texts.length; t++) {
+            if (texts[t].closest('a')) continue;
+            var tr = texts[t].getBoundingClientRect();
+            if (!tr.width && !tr.height) continue;
+            looseText.push({ el: texts[t], y: tr.top + tr.height / 2 });
+        }
+
         for (var s = 0; s < messageOrder.length; s++) {
             var step = messageOrder[s];
 
-            // The arrow is drawn just under its label. Searching symmetrically around the
-            // label instead would sweep in whatever sits on the row above - a "..." delay
-            // line spans the full width, which would make the message look as though it
-            // ran between the outermost participants.
-            var candidates = [];
+            // A message owns everything from its label down to the next message's label.
+            // PlantUML draws the label above its arrow, so this captures the arrow and the
+            // several segments of a self-message loop, while excluding both the next
+            // message's arrow and anything on the row above - a "..." delay line spans the
+            // full width, and sweeping that in made messages look as though they ran
+            // between the outermost participants.
+            var limit = s + 1 < messageOrder.length ? messageOrder[s + 1].top : Infinity;
+
+            var minX = Infinity, maxX = -Infinity, headX = null;
             for (var g = 0; g < geometry.length; g++) {
                 var gr = geometry[g].r;
                 if (!gr.width && !gr.height) continue;
                 if (gr.height > MAX_ARROW_HEIGHT) continue;
                 var gy = gr.top + gr.height / 2;
-                if (gy < step.top || gy > step.bottom + BAND) continue;
-                candidates.push({ el: geometry[g].el, r: gr, y: gy });
-            }
-
-            // Of those, keep only the row nearest the label, so a neighbouring message
-            // packed close below cannot contribute its own span.
-            var bestY = null, bestGap = Infinity;
-            for (var c = 0; c < candidates.length; c++) {
-                var gap = Math.abs(candidates[c].y - step.bottom);
-                if (gap < bestGap) { bestGap = gap; bestY = candidates[c].y; }
-            }
-
-            var minX = Infinity, maxX = -Infinity, headX = null;
-            for (var c = 0; c < candidates.length; c++) {
-                if (bestY === null || Math.abs(candidates[c].y - bestY) > ROW_TOLERANCE) continue;
-                step.parts.push(candidates[c].el);
-                minX = Math.min(minX, candidates[c].r.left);
-                maxX = Math.max(maxX, candidates[c].r.right);
+                if (gy < step.top || gy >= limit) continue;
+                step.parts.push(geometry[g].el);
+                minX = Math.min(minX, gr.left);
+                maxX = Math.max(maxX, gr.right);
                 // The arrowhead marks the receiving end, which is what makes the
                 // direction recoverable at all.
-                if (candidates[c].el.tagName.toLowerCase() === 'polygon') {
-                    headX = candidates[c].r.left + candidates[c].r.width / 2;
+                if (geometry[g].el.tagName.toLowerCase() === 'polygon') {
+                    headX = gr.left + gr.width / 2;
                 }
             }
+
+            for (var t = 0; t < looseText.length; t++) {
+                if (looseText[t].y < step.top || looseText[t].y >= limit) continue;
+                step.parts.push(looseText[t].el);
+            }
+
             step.minX = minX;
             step.maxX = maxX;
             step.headX = headX;
@@ -175,24 +178,35 @@
         }
     }
 
-    function show(index) {
+    /**
+     * executedCsv lists the steps that have actually run, which is not simply
+     * "everything before the current one": branches the user did not choose are skipped
+     * and must stay hidden even once playback has moved past them.
+     */
+    function render(executedCsv, index) {
         clearAll();
 
         // Before the first step the whole diagram is shown, so the player opens on
         // something recognisable rather than an empty canvas.
-        if (index < 0) {
+        if (index < 0 && !executedCsv) {
             document.body.classList.remove('playing');
             return '';
         }
         document.body.classList.add('playing');
-        if (index >= steps.length) return '';
 
-        for (var i = 0; i < steps.length; i++) {
-            var future = i > index;
-            setClass(steps[i].els, 'step-future', future);
-            setClass(steps[i].parts, 'step-future', future);
+        var executed = {};
+        if (executedCsv) {
+            var ids = executedCsv.split(',');
+            for (var k = 0; k < ids.length; k++) executed[parseInt(ids[k], 10)] = true;
         }
 
+        for (var i = 0; i < steps.length; i++) {
+            var shown = (i === index) || executed[i] === true;
+            setClass(steps[i].els, 'step-future', !shown);
+            setClass(steps[i].parts, 'step-future', !shown);
+        }
+
+        if (index < 0 || index >= steps.length) return '';
         var step = steps[index];
         setClass(step.els, 'step-current', true);
         setClass(step.parts, 'step-current', true);
@@ -256,7 +270,14 @@
 
     window.player = {
         build: build,
-        show: show,
-        count: function () { return steps.length; }
+        render: render,
+        count: function () { return steps.length; },
+        // Every step's target, in order, so the caller can resolve each to a source line
+        // once rather than asking again on each step.
+        targets: function () {
+            var out = [];
+            for (var i = 0; i < steps.length; i++) out.push(steps[i].href);
+            return out.join(SEP);
+        }
     };
 })();

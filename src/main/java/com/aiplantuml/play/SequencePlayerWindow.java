@@ -14,6 +14,7 @@ import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
+import javafx.scene.control.ChoiceDialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.Slider;
 import javafx.scene.layout.BorderPane;
@@ -29,8 +30,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.function.IntConsumer;
+import java.util.stream.Collectors;
 
 /**
  * Plays a sequence diagram one message at a time, in its own window.
@@ -64,7 +73,14 @@ public class SequencePlayerWindow {
     private final Map<String, Integer> nodeLineNumbers;
     private final IntConsumer onStepLine;
     private final Timeline timeline = new Timeline();
+    private final BlockModel blocks;
 
+    /** Steps actually run, which excludes the branches not chosen. */
+    private final Set<Integer> executed = new LinkedHashSet<>();
+    /** Branch picked for each alt, remembered for the rest of the run. */
+    private final Map<Integer, Integer> decisions = new HashMap<>();
+
+    private int[] stepLines = new int[0];
     private int stepCount = 0;
     private int current = -1;
 
@@ -76,6 +92,7 @@ public class SequencePlayerWindow {
      */
     public SequencePlayerWindow(Stage owner, String source, String background, IntConsumer onStepLine) {
         this.onStepLine = onStepLine;
+        this.blocks = BlockModel.parse(source);
 
         PlantUmlRenderer.SvgRenderResult result = new PlantUmlRenderer().renderSvg(source);
         if (result.isError()) {
@@ -94,9 +111,9 @@ public class SequencePlayerWindow {
         stage.setTitle("Play diagram");
         AppIcons.applyTo(stage);
 
-        resetButton.setOnAction(e -> { pause(); goTo(-1); });
-        stepBackButton.setOnAction(e -> { pause(); goTo(current - 1); });
-        stepForwardButton.setOnAction(e -> { pause(); goTo(current + 1); });
+        resetButton.setOnAction(e -> { pause(); restart(); });
+        stepBackButton.setOnAction(e -> { pause(); stepBack(); });
+        stepForwardButton.setOnAction(e -> { pause(); advance(); });
         playButton.setOnAction(e -> togglePlay());
 
         speedSlider.setPrefWidth(120);
@@ -137,8 +154,9 @@ public class SequencePlayerWindow {
             if (state != Worker.State.SUCCEEDED) return;
             Object count = engine.executeScript("window.player.build()");
             stepCount = count instanceof Number n ? n.intValue() : 0;
+            resolveStepLines(engine);
             setControlsEnabled(stepCount > 0);
-            goTo(-1);
+            restart();
             if (stepCount == 0) {
                 positionLabel.setText("No messages to play");
             }
@@ -146,12 +164,23 @@ public class SequencePlayerWindow {
         engine.loadContent(wrap(svg, background));
     }
 
+    /** Each step's source line, so its place in the alt/else structure is known up front. */
+    private void resolveStepLines(WebEngine engine) {
+        stepLines = new int[stepCount];
+        Object targets = engine.executeScript("window.player.targets()");
+        String[] hrefs = targets instanceof String s && !s.isBlank()
+                ? s.split("\u0001", -1) : new String[0];
+        for (int i = 0; i < stepCount; i++) {
+            stepLines[i] = i < hrefs.length ? lineFor(hrefs[i]).orElse(-1) : -1;
+        }
+    }
+
     private void togglePlay() {
         if (timeline.getStatus() == Animation.Status.RUNNING) {
             pause();
         } else {
             if (current >= stepCount - 1) {
-                goTo(-1);
+                restart();
             }
             startTimeline();
             playButton.setText("⏸  Pause");
@@ -161,14 +190,23 @@ public class SequencePlayerWindow {
     private void startTimeline() {
         timeline.stop();
         timeline.getKeyFrames().setAll(new KeyFrame(Duration.seconds(speedSlider.getValue()), e -> {
-            if (current >= stepCount - 1) {
+            if (!advance()) {
                 pause();
-                return;
             }
-            goTo(current + 1);
         }));
         timeline.setCycleCount(Animation.INDEFINITE);
         timeline.play();
+    }
+
+    /** Rewinds to the previously executed step, leaving branch decisions in place. */
+    private void stepBack() {
+        List<Integer> played = new ArrayList<>(executed);
+        if (played.isEmpty()) return;
+        played.remove(played.size() - 1);
+        executed.clear();
+        executed.addAll(played);
+        current = played.isEmpty() ? -1 : played.get(played.size() - 1);
+        renderCurrent();
     }
 
     private void pause() {
@@ -176,9 +214,85 @@ public class SequencePlayerWindow {
         playButton.setText("▶  Play");
     }
 
-    private void goTo(int index) {
-        current = Math.max(-1, Math.min(index, stepCount - 1));
-        Object result = diagramView.getEngine().executeScript("window.player.show(" + current + ")");
+    /** Back to the untouched diagram, with every branch decision forgotten. */
+    private void restart() {
+        executed.clear();
+        decisions.clear();
+        current = -1;
+        renderCurrent();
+    }
+
+    /**
+     * Advances to the next step the chosen path actually reaches, asking which branch to
+     * follow the first time an alt is entered and skipping the branches not taken.
+     * Returns false once the run is over.
+     */
+    private boolean advance() {
+        int candidate = current + 1;
+        while (candidate < stepCount) {
+            List<BlockModel.Choice> path = pathOf(candidate);
+
+            BlockModel.Choice undecided = null;
+            for (BlockModel.Choice choice : path) {
+                if (!decisions.containsKey(choice.blockId())) { undecided = choice; break; }
+            }
+            if (undecided != null) {
+                Integer picked = askBranch(undecided.blockId());
+                if (picked == null) return false;           // cancelled - stay put
+                decisions.put(undecided.blockId(), picked);
+                continue;                                    // re-test with the choice applied
+            }
+
+            boolean onChosenPath = true;
+            for (BlockModel.Choice choice : path) {
+                if (!Objects.equals(decisions.get(choice.blockId()), choice.branchIndex())) {
+                    onChosenPath = false;
+                    break;
+                }
+            }
+            if (onChosenPath) {
+                current = candidate;
+                executed.add(candidate);
+                renderCurrent();
+                return true;
+            }
+            candidate++;
+        }
+        return false;
+    }
+
+    private List<BlockModel.Choice> pathOf(int step) {
+        int line = step < stepLines.length ? stepLines[step] : -1;
+        return line < 0 ? List.of() : blocks.pathFor(line);
+    }
+
+    private Integer askBranch(int blockId) {
+        List<String> branches = blocks.branchesOf(blockId);
+        if (branches.size() < 2) return 0;
+
+        boolean wasRunning = timeline.getStatus() == Animation.Status.RUNNING;
+        pause();
+
+        ChoiceDialog<String> dialog = new ChoiceDialog<>(branches.get(0), branches);
+        dialog.initOwner(stage);
+        dialog.setTitle("Which branch?");
+        dialog.setHeaderText("This " + blocks.kindOf(blockId) + " has more than one path. Which one runs?");
+        dialog.setContentText("Branch:");
+        Optional<String> answer = dialog.showAndWait();
+        if (answer.isEmpty()) return null;
+
+        if (wasRunning) {
+            startTimeline();
+            playButton.setText("⏸  Pause");
+        }
+        return branches.indexOf(answer.get());
+    }
+
+    /** Steps already run stay visible; the branches not taken were never run, so stay hidden. */
+    private void renderCurrent() {
+        String csv = executed.stream().map(String::valueOf).collect(Collectors.joining(","));
+        Object result = diagramView.getEngine()
+                .executeScript("window.player.render('" + csv + "'," + current + ")");
         updatePosition();
 
         // "href \u0001 from \u0001 to" - the participants are resolved in the page, where
@@ -203,8 +317,10 @@ public class SequencePlayerWindow {
     }
 
     private void updatePosition() {
-        positionLabel.setText(stepCount == 0 ? "" : (current + 1) + " / " + stepCount);
-        stepBackButton.setDisable(current < 0);
+        // Counts what has run rather than how far down the diagram we are: with branching,
+        // the steps skipped in paths not taken never happen, so the total is only a ceiling.
+        positionLabel.setText(stepCount == 0 ? "" : executed.size() + " / " + stepCount);
+        stepBackButton.setDisable(executed.isEmpty());
         stepForwardButton.setDisable(current >= stepCount - 1);
     }
 
