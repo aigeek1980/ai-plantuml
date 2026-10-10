@@ -53,6 +53,7 @@ public class SequencePlayerWindow {
     private final Stage stage = new Stage();
     private final WebView diagramView = new WebView();
     private final Label positionLabel = new Label();
+    private final Label endpointsLabel = new Label();
     private final Button playButton = new Button("▶  Play");
     private final Button stepBackButton = new Button("◀");
     private final Button stepForwardButton = new Button("▶");
@@ -109,8 +110,12 @@ public class SequencePlayerWindow {
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
+        // The participants are named in the bar as well as highlighted in the diagram,
+        // since on a long diagram their boxes can be scrolled far off screen.
+        endpointsLabel.setStyle("-fx-font-weight: bold; -fx-text-fill: #B3261E;");
+
         HBox controls = new HBox(8, resetButton, stepBackButton, playButton, stepForwardButton,
-                new Label("Speed:"), speedSlider, spacer, followEditor, positionLabel);
+                new Label("Speed:"), speedSlider, spacer, endpointsLabel, followEditor, positionLabel);
         controls.setAlignment(Pos.CENTER_LEFT);
         controls.setPadding(new Insets(8));
         controls.setStyle("-fx-background-color: #F2F3F5; "
@@ -173,10 +178,20 @@ public class SequencePlayerWindow {
 
     private void goTo(int index) {
         current = Math.max(-1, Math.min(index, stepCount - 1));
-        Object href = diagramView.getEngine().executeScript("window.player.show(" + current + ")");
+        Object result = diagramView.getEngine().executeScript("window.player.show(" + current + ")");
         updatePosition();
-        if (followEditor.isSelected() && href instanceof String s && !s.isBlank()) {
-            lineFor(s).ifPresent(onStepLine::accept);
+
+        // "href \u0001 from \u0001 to" - the participants are resolved in the page, where
+        // the rendered geometry says which lifelines the arrow actually runs between.
+        String[] parts = result instanceof String s && !s.isBlank() ? s.split("\u0001", -1) : new String[0];
+        if (parts.length == 3) {
+            endpointsLabel.setText(parts[1].isBlank() && parts[2].isBlank()
+                    ? "" : parts[1] + "  →  " + parts[2]);
+        } else {
+            endpointsLabel.setText("");
+        }
+        if (followEditor.isSelected() && parts.length > 0 && !parts[0].isBlank()) {
+            lineFor(parts[0]).ifPresent(onStepLine::accept);
         }
     }
 
@@ -205,24 +220,25 @@ public class SequencePlayerWindow {
         return """
                 <!DOCTYPE html>
                 <html><head><meta charset="utf-8"><style>
-                  html, body { margin: 0; padding: 0; background: %s; }
+                  html, body { margin: 0; padding: 0; background: %s; cursor: grab; }
                   html, body, svg, svg * { -webkit-user-select: none; user-select: none; }
+                  body.panning { cursor: grabbing; }
                   svg text { white-space: pre; }
 
-                  /* Everything recedes while playing; the active message is lifted back out.
-                     The dimming rules are more specific than a bare class would be, so the
-                     highlight has to override them explicitly. */
-                  body.playing text,
-                  body.playing line,
-                  body.playing path,
-                  body.playing polygon { opacity: 0.16; transition: opacity 120ms linear; }
+                  /* The diagram reads as an execution trace: what has already happened
+                     stays as drawn, what hasn't happened yet is not there at all, and the
+                     step being executed is picked out in colour. */
+                  .step-future,
+                  .step-future * { opacity: 0 !important; }
 
-                  body.playing .step-current,
-                  body.playing .step-current *,
-                  body.playing text.step-current,
-                  body.playing line.step-current,
-                  body.playing path.step-current,
-                  body.playing polygon.step-current { opacity: 1 !important; }
+                  .step-current text { fill: #B3261E !important; font-weight: bold; }
+                  line.step-current,
+                  path.step-current { stroke: #B3261E !important; stroke-width: 2.5 !important; }
+                  polygon.step-current { stroke: #B3261E !important; fill: #B3261E !important; }
+
+                  /* The two participants this step runs between. */
+                  .participant-current rect { stroke: #B3261E !important; stroke-width: 2.5 !important; }
+                  .participant-current text { fill: #B3261E !important; font-weight: bold; }
                 </style></head><body>%s<script>%s</script></body></html>
                 """.formatted(background, svg, playerScript());
     }
