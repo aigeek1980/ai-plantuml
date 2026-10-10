@@ -21,6 +21,12 @@ Grab the latest self-contained Windows build from [Releases](https://github.com/
   - Summary (Markdown) - a short summary
   - Each Markdown export uses a default AI prompt that's fully editable in Settings
   - The window locks with a wait cursor while an export's AI call is in flight, so it's clear something is happening
+- **Diagram player** (Diagram > Play Diagram...) - run a sequence diagram one call at a time in its own window, leaving the editor untouched:
+  - Builds up only what actually runs: lifelines arrive when first used, branches you don't take never appear, and a `par` runs its lanes side by side
+  - You're asked which branch an `alt` takes when the run reaches it, and at the end of a `loop` whether to go round again
+  - Starts at the line your cursor is on, so a long diagram can be picked up partway
+  - The current call is highlighted and the view zooms to keep both its lifelines on screen; the editor follows along
+  - Tick **Record frames** and the run can then be exported as an animated GIF (with your own frame delay) or as one PNG per step
 - Diagrams render as SVG, so zooming stays crisp at any level
 - Click any participant *or any individual call* in the diagram to copy its name and jump the editor cursor straight to its source line; drag anywhere to pan
 - Open/save `.puml` files, remembers the last-used folder
@@ -70,6 +76,7 @@ src/main/java/com/aiplantuml/
   App.java, Launcher.java   - JavaFX application entry point
   ai/                       - AI provider client
   config/                   - local settings persistence
+  play/                     - the diagram player and its GIF/frame export
   render/                   - PlantUML rendering + diagram-node hit-testing
   ui/                       - JavaFX UI components
 ```
